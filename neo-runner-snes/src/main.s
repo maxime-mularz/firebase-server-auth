@@ -19,8 +19,9 @@
 ;     attributs NES par nametable entière.
 ;
 ;  Physique, caméra, mondes, drones : le code NES ligne à ligne (8 bits,
-;  sep #$30). Le son attend le chapitre SPC700. Voir ../casse-brique-snes/
-;  pour l'init 65816 commentée pas à pas.
+;  sep #$30). Le son vient du module commun ../snes-commun/son.s (le
+;  SPC700), jingles compris. Voir ../casse-brique-snes/ pour l'init 65816
+;  commentée pas à pas.
 ; =============================================================================
 
 .setcpu "65816"
@@ -184,6 +185,10 @@ drone_y:       .res 3
 drone_dir:     .res 3
 drone_actif:   .res 3
 monde:         .res 1
+jingle_actif:  .res 1   ; un jingle (mini-partition sur la voix des bips) joue
+jingle_pos:    .res 1
+jingle_cpt:    .res 1
+jingle_ptr:    .res 2
 
 .bss
 carte:          .res 1024
@@ -333,6 +338,11 @@ reset:
         sta etat
         lda #1
         sta monde
+
+        ; le SPC700 d'abord (avant la NMI) — et noter que ce jeu relance par
+        ; "jmp reset" : initialiser_son sait que le pilote survit (voir son.s)
+        jsr initialiser_son
+        jsr demarrer_musique
 
         jsr dessiner_bandeau
         jsr charger_niveau
@@ -680,6 +690,9 @@ ecrire_colonne:
 ; =============================================================================
 principale:
         jsr attendre_nmi
+        jsr maj_musique
+        jsr maj_bruitages_jingle
+        jsr maj_jingle
         jsr lire_manette
 
         lda etat
@@ -707,6 +720,7 @@ principale:
         jsr allumer_ecran
         lda #ETAT_JEU
         sta etat
+        jsr bip_depart
         jmp @dessiner
 
 @en_jeu:
@@ -971,6 +985,7 @@ maj_joueur:
         lda #SAUT_HI
         sta vy_hi
         stz au_sol
+        jsr bip_saut
 @pas_de_saut:
 
         lda joueur_x_lo         ; une puce ?
@@ -1000,6 +1015,7 @@ maj_joueur:
         cmp #2
         beq @victoire_finale
         inc monde
+        jsr jouer_jingle_victoire
         jsr eteindre_ecran
         jsr charger_niveau
         jsr allumer_ecran
@@ -1007,6 +1023,8 @@ maj_joueur:
 @victoire_finale:
         lda #ETAT_GAGNE
         sta etat
+        jsr arreter_musique
+        jsr jouer_jingle_victoire
 @fin:
         rts
 
@@ -1044,6 +1062,7 @@ ramasser_puce:
         lda #0
         tay
         sta (carte_ptr), y
+        jsr bip_puce            ; cling !
         inc score_d
         lda score_d
         cmp #10
@@ -1103,8 +1122,11 @@ mourir:
         bne @rejouer
         lda #ETAT_PERDU
         sta etat
-        rts
+        jsr arreter_musique
+        jsr jouer_jingle_defaite
+        jmp bruit_fin           ; long grondement (son rts conclura)
 @rejouer:
+        jsr bruit_vie           ; "pshh"
         jsr eteindre_ecran
         jsr charger_niveau
         jsr allumer_ecran
@@ -1294,6 +1316,7 @@ maj_drones:
         sta vy_lo
         lda #$FD
         sta vy_hi
+        jsr bruit_ecrase        ; "crounch" (X n'est pas abîmé, ouf)
         jmp @suivant
 @fatal:
         jmp mourir
@@ -1644,6 +1667,107 @@ niveau_2:
         .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B
         .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B
         .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B
+
+
+; =============================================================================
+;  LE SON — le module SPC700 commun, les jingles et le catalogue du runner
+; =============================================================================
+.include "son.s"
+
+; --- Les jingles : le moteur NES, porté mot pour mot. Seul le "haut-parleur"
+;     change : jouer_note sur la voix des bips, au lieu des registres APU. ---
+jouer_jingle_victoire:
+        lda #<jingle_victoire
+        sta jingle_ptr
+        lda #>jingle_victoire
+        sta jingle_ptr+1
+        jmp lancer_jingle
+jouer_jingle_defaite:
+        lda #<jingle_defaite
+        sta jingle_ptr
+        lda #>jingle_defaite
+        sta jingle_ptr+1
+lancer_jingle:
+        lda #1
+        sta jingle_actif
+        sta jingle_cpt          ; la première note part à la prochaine image
+        stz jingle_pos
+        rts
+
+maj_jingle:
+        lda jingle_actif
+        bne @actif
+        rts
+@actif:
+        dec jingle_cpt
+        beq @note_suivante
+        rts
+@note_suivante:
+        ldy jingle_pos
+        lda (jingle_ptr), y
+        cmp #$FF
+        bne @jouer
+        stz jingle_actif        ; partition terminée : silence et rideau
+        ldx #VOIX_BIP
+        jmp couper_voix
+@jouer:
+        phy                     ; jouer_note mange Y : on le met à l'abri
+        ldx #VOIX_BIP
+        jsr jouer_note
+        ply
+        iny
+        lda (jingle_ptr), y
+        sta jingle_cpt
+        iny
+        sty jingle_pos
+        rts
+
+jingle_victoire: .byte NOTE_DO5, 8,  NOTE_MI5, 8,  NOTE_SOL5, 8,  NOTE_LA5, 24, $FF
+jingle_defaite:  .byte NOTE_MI5, 10, NOTE_DO5, 10, NOTE_LA4, 10, NOTE_FA4, 28, $FF
+
+; Le garde-fou de la NES, conservé : tant qu'un jingle occupe la voix des
+; bips, maj_bruitages ne doit pas lui couper le sifflet à contretemps.
+maj_bruitages_jingle:
+        lda jingle_actif
+        beq @normal
+        stz bip_cpt             ; le jingle est le seul maître de la voix 2
+@normal:
+        jmp maj_bruitages
+
+; Le catalogue des sons du jeu (des numéros de notes, plus des périodes) :
+bip_depart:                     ; Start pressé
+        lda #NOTE_LA4
+        ldy #4
+        jmp jouer_bip
+bip_saut:                       ; hop !
+        lda #NOTE_SOL4
+        ldy #3
+        jmp jouer_bip
+bip_puce:                       ; cling ! aigu
+        lda #NOTE_DO6
+        ldy #4
+        jmp jouer_bip
+bruit_ecrase:                   ; "crounch" : un drone de moins
+        ldy #8
+        jmp jouer_bruit
+bruit_vie:                      ; "pshh" : une vie s'envole
+        ldy #20
+        jmp jouer_bruit
+bruit_fin:                      ; long grondement de game over
+        ldy #45
+        jmp jouer_bruit
+
+; LA PARTITION — les mêmes arpèges nocturnes que sur NES, note pour note.
+melodie:
+        .byte NOTE_MI5, 12, NOTE_DO5,  12, NOTE_LA4, 12, NOTE_DO5, 12
+        .byte NOTE_DO5, 12, NOTE_LA4,  12, NOTE_FA4, 12, NOTE_LA4, 12
+        .byte NOTE_MI5, 12, NOTE_SOL5, 12, NOTE_MI5, 12, NOTE_DO5, 12
+        .byte NOTE_RE5, 12, NOTE_SI4,  12, NOTE_SOL4, 12, NOTE_SI4, 12
+        .byte $FF
+
+basse:
+        .byte NOTE_LA2, 48, NOTE_FA2, 48, NOTE_DO3, 48, NOTE_SOL2, 48
+        .byte $FF
 
 
 .segment "RODATA"

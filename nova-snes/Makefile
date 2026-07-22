@@ -1,6 +1,6 @@
-# Casse-brique SNES : atelier graphique -> assemblage -> edition de liens
-# -> sommes de controle de l'en-tete. Produit casse-brique.sfc.
-ROM = casse-brique.sfc
+# NOVA SNES : atelier graphique -> assemblage -> edition de liens
+# -> sommes de controle de l'en-tete. Produit nova.sfc.
+ROM = nova.sfc
 
 $(ROM): main.o snes.cfg
 	ld65 -C snes.cfg -o $@ main.o

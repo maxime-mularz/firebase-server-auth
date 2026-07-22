@@ -6,8 +6,8 @@ $(ROM): main.o snes.cfg
 	ld65 -C snes.cfg -o $@ main.o
 	python3 tools/checksum.py $@
 
-main.o: src/main.s gfx_bg.bin
-	ca65 --cpu 65816 -o $@ src/main.s
+main.o: src/main.s ../snes-commun/son.s gfx_bg.bin
+	ca65 --cpu 65816 -I ../snes-commun -o $@ src/main.s
 
 gfx_bg.bin: tools/make_gfx.py
 	python3 tools/make_gfx.py

@@ -23,9 +23,9 @@
 ;     d'ingénierie, l'octet $4219 a exactement la même disposition de bits
 ;     que notre variable `boutons` sur NES. Zéro adaptation.
 ;
-;  Le son (le SPC700 : un second processeur complet, avec sa propre RAM)
-;  est le chapitre suivant du cours — cette version est muette, et c'est
-;  un choix assumé.
+;  Le son vient du SPC700 : un second processeur complet, avec sa propre
+;  RAM, auquel on téléverse un pilote au démarrage. Tout est raconté dans
+;  ../snes-commun/son.s — la partition NES rejoue, note pour note.
 ;
 ;  Les graphismes ne sont plus écrits en binaire dans le source : à 16
 ;  couleurs par tuile ce serait illisible. L'atelier tools/make_gfx.py
@@ -382,6 +382,12 @@ reset:
         lda #$02
         sta HDMAEN
 
+        ; --- réveiller le SECOND ordinateur : le SPC700 -------------------------
+        ;  Avant d'activer la NMI : le téléversement du pilote son prend
+        ;  quelques millisecondes de dialogue ininterrompu (voir son.s).
+        jsr initialiser_son
+        jsr demarrer_musique
+
         ; --- le décor permanent, l'écran titre, et rideau -----------------------
         jsr dessiner_cadre
         jsr dessiner_ecran_titre
@@ -720,6 +726,8 @@ points_brique:   .byte 0, 1, 0, 5, 2
 ; =============================================================================
 principale:
         jsr attendre_nmi
+        jsr maj_musique         ; le moteur NES, qui télégraphie au SPC700
+        jsr maj_bruitages
         jsr lire_manette
         jsr maj_raquette
 
@@ -749,6 +757,7 @@ principale:
         sta etat
         lda #3
         sta vies
+        jsr demarrer_musique
         jsr allumer_ecran
         jmp @dessiner
 
@@ -759,6 +768,7 @@ principale:
         jmp @dessiner
 @lancer_partie:
         jsr demarrer_partie
+        jsr bip_raquette
         jmp @dessiner
 
 @entracte:
@@ -791,6 +801,7 @@ principale:
         beq @dessiner
         lda #ETAT_JEU
         sta etat
+        jsr bip_raquette
         lda #0
         sec
         sbc vitesse_extra
@@ -950,6 +961,7 @@ deplacer_balle:
         lda balle_dx_hi
         bpl @pas_mur_gauche
         jsr inverser_dx
+        jsr bip_mur
 @pas_mur_gauche:
         lda balle_x
         cmp #BALLE_X_MAX + 1
@@ -959,6 +971,7 @@ deplacer_balle:
         lda balle_dx_hi
         bmi @pas_mur_droit
         jsr inverser_dx
+        jsr bip_mur
 @pas_mur_droit:
         lda balle_ys
         clc
@@ -974,6 +987,7 @@ deplacer_balle:
         lda balle_dy_hi
         bpl @pas_mur_haut
         jsr inverser_dy
+        jsr bip_mur
 @pas_mur_haut:
         lda balle_y
         cmp #BALLE_Y_PERDU
@@ -1066,7 +1080,7 @@ collision_briques:
         sta grille, x
         ldy #TYPE_FISSUREE
         jsr programmer_redessin
-        rts
+        jmp bip_mur             ; "toc" : du solide !
 
 @detruire:
         lda #0
@@ -1074,6 +1088,7 @@ collision_briques:
         ldy tmp2
         lda points_brique, y
         jsr ajouter_points
+        jsr bip_brique
         ldy #0
         jsr programmer_redessin
         jsr lacher_capsule
@@ -1084,6 +1099,7 @@ collision_briques:
         sta etat
         lda #120
         sta pause_cpt
+        jsr bip_victoire
 @rien:
         rts
 
@@ -1209,8 +1225,15 @@ collision_raquette:
         lda zones_dy_hi, y
         sbc #0
         sta balle_dy_hi
+        ; --- le son suit la zone (v2.1 NES) : grave au bord, clair au centre.
+        ;     Sur SNES, plus de périodes APU : un simple NUMÉRO de note.
+        lda sons_zone, y
+        ldy #4
+        jsr jouer_bip
 @rate:
         rts
+
+sons_zone: .byte NOTE_SOL4, NOTE_LA4, NOTE_DO5, NOTE_LA4, NOTE_SOL4
 
 zones_dx_lo: .byte $00, $80, $80, $80, $00
 zones_dx_hi: .byte $FE, $FE, $00, $01, $02
@@ -1283,6 +1306,7 @@ maj_capsule:
         cmp #31
         bcs @fin
 @attrapee:
+        jsr bip_bonus
         lda capsule_type
         cmp #CAPS_LARGE
         beq @elargir
@@ -1353,7 +1377,7 @@ perdre_vie:
         beq @plus_de_vies
         lda #ETAT_ATTENTE
         sta etat
-        rts
+        jmp bruit_vie
 @plus_de_vies:
         lda #ETAT_FINI
         sta etat
@@ -1362,7 +1386,8 @@ perdre_vie:
         lda #1
         sta go_actif
         jsr maj_record
-        rts
+        jsr arreter_musique
+        jmp bruit_fin
 
 maj_record:
         lda score_c
@@ -1643,6 +1668,53 @@ motif_forteresse:
         .byte R,N,D,D,N,N,D,D,D,N,N,D,D,N,R, V
         .byte R,N,N,N,N,N,N,N,N,N,N,N,N,N,R, V
         .byte R,R,R,R,R,R,R,R,R,R,R,R,R,R,R, V
+
+
+; =============================================================================
+;  LE SON — le module SPC700 commun, et le catalogue propre à ce jeu
+; =============================================================================
+;  Sur NES, chaque bip donnait une PÉRIODE au registre APU. Ici, un NUMÉRO
+;  de note suffit : le module son.s convertit et télégraphie au SPC700.
+.include "son.s"
+
+bip_mur:                        ; toc discret (murs, briques solides)
+        lda #NOTE_SOL4
+        ldy #3
+        jmp jouer_bip
+bip_raquette:                   ; ponk (lancement, Start)
+        lda #NOTE_LA4
+        ldy #4
+        jmp jouer_bip
+bip_brique:                     ; cling ! une brique de moins
+        lda #NOTE_DO6
+        ldy #4
+        jmp jouer_bip
+bip_bonus:                      ; l'éclat d'une capsule attrapée
+        lda #NOTE_SOL5
+        ldy #6
+        jmp jouer_bip
+bip_victoire:                   ; niveau terminé !
+        lda #NOTE_LA5
+        ldy #40
+        jmp jouer_bip
+bruit_vie:                      ; pshh : une vie s'envole
+        ldy #20
+        jmp jouer_bruit
+bruit_fin:                      ; long grondement de game over
+        ldy #45
+        jmp jouer_bruit
+
+; Les partitions : les MÊMES que sur NES, note pour note.
+melodie:
+        .byte NOTE_DO5,  12, NOTE_MI5, 12, NOTE_SOL5, 12, NOTE_MI5, 12
+        .byte NOTE_LA4,  12, NOTE_DO5, 12, NOTE_MI5,  12, NOTE_DO5, 12
+        .byte NOTE_FA4,  12, NOTE_LA4, 12, NOTE_DO5,  12, NOTE_LA4, 12
+        .byte NOTE_SOL4, 12, NOTE_SI4, 12, NOTE_RE5,  12, NOTE_SI4, 12
+        .byte $FF
+
+basse:
+        .byte NOTE_DO3, 48, NOTE_LA2, 48, NOTE_FA2, 48, NOTE_SOL2, 48
+        .byte $FF
 
 
 ; =============================================================================

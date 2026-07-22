@@ -32,10 +32,17 @@ make          # → neo-runner.sfc (cc65 requis)
   notre bot de simulation suit une trajectoire *image pour image identique*
   sur les deux consoles.
 
-Le son (SPC700) reste le chapitre à venir. Graphismes générés par
-`tools/make_gfx.py` (pixel-art texte → 4bpp et 2bpp — notez le format
-2bpp SNES : plans *entrelacés* ligne à ligne, la NES les rangeait l'un
-après l'autre).
+- **Le son : mêmes jingles, autre haut-parleur.** Le module commun
+  [../snes-commun/son.s](../snes-commun/son.s) fait rejouer la partition
+  NES par le SPC700, et le moteur de jingles est porté mot pour mot — seule
+  la dernière ligne change : `jouer_note` sur la voix des bips, au lieu des
+  registres APU. Bonus de console réelle : ce jeu relance par `jmp reset`,
+  et le SPC700, lui, **survit au reset logiciel** — voyez comment
+  `initialiser_son` reconnaît son pilote déjà en place.
+
+Graphismes générés par `tools/make_gfx.py` (pixel-art texte → 4bpp et
+2bpp — notez le format 2bpp SNES : plans *entrelacés* ligne à ligne, la
+NES les rangeait l'un après l'autre).
 
 ## Exercices
 

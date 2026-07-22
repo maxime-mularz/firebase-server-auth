@@ -8,9 +8,10 @@ balle nacrée, raquette métallisée, police ombrée, et un **dégradé de ciel
 par HDMA**, la signature visuelle de la console.
 
 > Prérequis : les trois jeux NES du dépôt. Ici on n'explique que ce qui
-> change en passant à la 16 bits. Le **son** (le SPC700, un second
-> processeur complet) est le chapitre suivant du cours : cette version est
-> volontairement muette.
+> change en passant à la 16 bits. Le **son** est de la partie : le SPC700
+> (un second processeur complet) reçoit son programme au démarrage — c'est
+> le chapitre 6, raconté dans [../snes-commun/son.s](../snes-commun/son.s)
+> et le [README de NOVA SNES](../nova-snes/).
 
 ## Compiler et jouer
 
@@ -93,9 +94,11 @@ brouillon en RAM (comme sur NES), mais l'ordre des champs change
 4. **Mode 7 ?** — renseignez-vous sur le mode 7 (la rotation de fond de
    F-Zero)... et réfléchissez à ce que donnerait un casse-brique qui
    penche. (Chapitre avancé !)
-5. **Le vrai défi : le SPC700** — le processeur audio attend son programme
-   par une poignée de main sur les ports `$2140-$2143`. C'est un cours
-   entier à lui seul — le prochain.
+5. **Le SPC700, à votre tour** — le module [../snes-commun/son.s](../snes-commun/son.s)
+   téléverse notre pilote de 115 octets dans le processeur audio et rejoue
+   la partition NES sur des échantillons BRR. Lisez-le, puis : ajoutez une
+   3e voix d'accompagnement, ou dessinez un échantillon BRR « carré 25 % »
+   pour retrouver le timbre fin du canal 2 de la NES.
 
 ## Ressources
 
