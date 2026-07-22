@@ -27,6 +27,11 @@ Bros., écrit en assembleur 6502 et commenté ligne par ligne en français.
 > (registres, drapeaux, `#valeur` vs adresse, PPU, tuiles, sprites, NMI).
 > Commencez par lui ! Ici, on n'explique que ce qui est **nouveau**.
 
+> **Version 2** — le jeu est complet : écran titre, DEUX mondes, bandeau
+> de score fixe (sprite 0 !), quartiers colorés (attributs), animations,
+> musique et jingles. Voir la section
+> « [Version 2](#la-version-2--du-prototype-au-jeu-fini) ».
+
 ## Compiler et jouer
 
 ```bash
@@ -135,24 +140,53 @@ et on repousse le joueur au bord du bloc touché. En assembleur, bien
 La machine à états s'est enrichie : TITRE → JEU → (PERDU | GAGNÉ) → reset.
 Et le tableau de bord est fait de **sprites** (le fond défile, pas eux !).
 
+## La version 2 : du prototype au jeu fini
+
+Cinq chantiers ont terminé le jeu — chacun est commenté dans le source :
+
+- **Le bandeau fixe, par l'astuce du SPRITE 0** (`nmi`, `dessiner_hud`).
+  Le score et les vies sont des tuiles de décor... qui ne défilent pas :
+  l'image commence sans défilement (le bandeau se dessine droit), un
+  sprite invisible posé sur sa dernière ligne lève un drapeau quand le PPU
+  le peint, et à cet instant — en PLEINE image — on bascule le défilement
+  vers la caméra. C'est la technique exacte de Super Mario Bros. Dans
+  Mesen, l'Event Viewer montre la bascule à la ligne 24.
+- **Les tables d'attributs** : le bandeau a sa palette, et chaque écran du
+  niveau est un « quartier » au néon différent — cyan, rose — configuré une
+  fois, sans coût pendant le jeu.
+- **L'animation** (`maj_sprites`) : deux poses de jambes alternées toutes
+  les 8 images pour la course, rotors de drones à 15 Hz. Une animation, ce
+  n'est QUE changer un numéro de tuile au bon rythme.
+- **La musique et les JINGLES** (`maj_musique`, `maj_jingle`) : le moteur
+  du casse-brique, plus des mini-partitions sur le canal des bips — la
+  fanfare du monde suivant monte, celle du game over descend.
+- **L'écran titre et les DEUX MONDES** (`dessiner_titre_texte`,
+  `charger_niveau`) : un alphabet de 10 lettres dans la CHR, et des cartes
+  choisies par pointeur — la première antenne mène au monde 2 (trous plus
+  larges, tours plus hautes), la seconde à la victoire. Ajouter un monde
+  = ajouter une table. Au passage, un piège vécu : `charger_niveau` laisse
+  le PPU en mode « +32 » (colonnes)... et le premier titre s'est écrit
+  À LA VERTICALE. Le mode d'incrément fait partie de l'état du PPU !
+
 ## Exercices
 
 1. **Turbo** — passez la course de 2 à 3 pixels/image (`maj_joueur`). Que
    faut-il vérifier pour que les collisions tiennent toujours ?
 2. **Lune** — divisez `GRAVITE` par deux. Puis compensez en réduisant
    l'impulsion `SAUT_HI`/`SAUT_LO`. Vous venez de « game-designer ».
-3. **Level design** — ajoutez une plateforme et deux puces dans la table
-   `niveau`. Une ligne = une colonne, 15 lettres, du ciel au sol.
-4. **Drones nerveux** — faites-les patrouiller 2 pixels par image (attention
-   aux bornes !), ou ajoutez un 4e drone (tables + `.res 3` → `.res 4`... et
-   quoi d'autre ?).
+3. **Monde 3** — une troisième carte `niveau_3`, trois drones de plus dans
+   les tables, et... qu'est-ce qui doit changer dans `maj_joueur` pour que
+   la 2e antenne ne soit plus la dernière ?
+4. **Drones nerveux** — faites-les patrouiller 2 pixels par image au
+   monde 2 seulement (indice : les tables des drones savent déjà faire des
+   différences par monde).
 5. **Saut modulable** — dans `maj_joueur`, si A est relâché pendant la
    montée, divisez la vitesse verticale par deux : petit saut / grand saut,
    comme dans Mario.
-6. **Deux mondes** — après l'antenne, rechargez un second niveau (une
-   seconde table `niveau2` et un pointeur au lieu de l'adresse en dur).
-7. **Le son** — un « bip » à chaque puce via l'APU (`$4000-$4003`,
-   [doc](https://www.nesdev.org/wiki/APU_basics)).
+6. **Compositeur de jingles** — un troisième jingle « puce ramassée » de
+   deux notes très courtes (attention : il partage le canal des bips).
+7. **Chronomètre** — affichez au bandeau le temps écoulé (le compteur
+   `image` déborde 4 fois par seconde... il vous faut des secondes).
 
 ## Ressources
 

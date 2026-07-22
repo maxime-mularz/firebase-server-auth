@@ -95,6 +95,19 @@ TUILE_ROBOT_BAS2 = $0F   ; jambes écartées (pose 2 : la course !)
 TUILE_CHIFFRE_0  = $10
 TUILE_DRONE2     = $1A   ; rotors, phase 2
 TUILE_ICONE_PUCE = $1B   ; le petit losange du bandeau de score
+TIRET            = $1C
+; L'alphabet (les 10 lettres de nos deux phrases), tuiles $20+ :
+L_A = $20
+L_E = $21
+L_I = $22
+L_N = $23
+L_O = $24
+L_P = $25
+L_R = $26
+L_S = $27
+L_T = $28
+L_U = $29
+ESPACE = $00
 
 ; --- Les types de métatuiles (les "blocs" de 16×16 dont est fait le niveau) ---
 TYPE_VIDE    = 0
@@ -212,6 +225,13 @@ bas_cpt:       .res 1
 bip_cpt:       .res 1
 bruit_cpt:     .res 1
 
+; v2 : les deux mondes et les jingles
+monde:         .res 1   ; 1 ou 2 : le monde en cours
+jingle_actif:  .res 1   ; un jingle (mini-partition sur le carré 1) joue
+jingle_pos:    .res 1
+jingle_cpt:    .res 1
+jingle_ptr:    .res 2   ; pointeur vers la partition du jingle
+
 
 ; -----------------------------------------------------------------------------
 ;  VARIABLES en RAM ordinaire
@@ -288,8 +308,11 @@ reset:
         sta image
         lda #ETAT_TITRE
         sta etat
+        lda #1                  ; on commence au monde 1
+        sta monde
 
         jsr charger_niveau      ; copie la carte et dessine les 2 premiers écrans
+        jsr dessiner_titre_texte
 
         lda #%00001111          ; ouvre les 4 canaux du son...
         sta APUSTATUS
@@ -341,9 +364,13 @@ palettes:
 
 charger_niveau:
         ; --- 1) Copier la carte : 64 colonnes de 15 cases (+1 de bourrage) ---
-        lda #<niveau            ; <  et  >  extraient l'octet bas et l'octet
-        sta src_ptr             ; haut d'une adresse : c'est ainsi qu'on met
-        lda #>niveau            ; une adresse de 16 bits dans deux octets.
+        ;  v2 : DEUX mondes ! Le pointeur source vient d'une table indexée
+        ;  par le monde en cours — ajouter un monde = ajouter une carte.
+        ldx monde
+        dex                     ; monde 1 → index 0
+        lda mondes_lo, x        ; (les tables mondes_lo/hi contiennent les
+        sta src_ptr             ;  octets bas et haut de l'adresse de chaque
+        lda mondes_hi, x        ;  carte : une adresse 16 bits en 2 octets)
         sta src_ptr+1
         lda #$00
         sta dst_ptr
@@ -410,11 +437,25 @@ charger_niveau:
         lda #192                ; debout sur le sol (les pieds à 192+16=208)
         sta joueur_y
 
-        ldx #2                  ; les 3 drones : X = 2, puis 1, puis 0
+        ; les 3 drones du monde en cours : leurs tables font 6 entrées
+        ; (3 par monde), l'index est donc drone + (monde−1)×3
+        lda monde
+        sec
+        sbc #1
+        sta tmp_lo
+        asl a
+        clc
+        adc tmp_lo              ; (monde−1) × 3
+        sta tmp_lo
+        ldx #2                  ; X = le drone, Y = sa ligne dans les tables
 @drone:
-        lda drones_debut_lo, x
+        txa
+        clc
+        adc tmp_lo
+        tay
+        lda drones_debut_lo, y
         sta drone_x_lo, x
-        lda drones_debut_hi, x
+        lda drones_debut_hi, y
         sta drone_x_hi, x
         lda #200                ; tous volent au ras du sol
         sta drone_y, x
@@ -425,19 +466,29 @@ charger_niveau:
         bpl @drone
         rts
 
-; Position de départ de chaque drone dans le niveau (16 bits, donc 2 tables)
-drones_debut_lo: .byte $A0, $C0, $A0   ; 160, 448, 672
-drones_debut_hi: .byte $00, $01, $02
+; Où trouver la carte de chaque monde
+mondes_lo: .byte <niveau, <niveau_2
+mondes_hi: .byte >niveau, >niveau_2
+
+; Position de départ des drones : 3 lignes par monde (16 bits, donc 2 tables)
+drones_debut_lo: .byte $A0, $C0, $A0,  $90, $80, $70   ; monde 1 puis monde 2
+drones_debut_hi: .byte $00, $01, $02,  $00, $01, $02
 ; Bornes de leur va-et-vient
-drones_min_lo:   .byte $A0, $C0, $A0   ; 160, 448, 672
-drones_min_hi:   .byte $00, $01, $02
-drones_max_lo:   .byte $E8, $28, $E8   ; 232, 552, 744
-drones_max_hi:   .byte $00, $02, $02
+drones_min_lo:   .byte $A0, $C0, $A0,  $90, $80, $70
+drones_min_hi:   .byte $00, $01, $02,  $00, $01, $02
+drones_max_lo:   .byte $E8, $28, $E8,  $C8, $C0, $B8
+drones_max_hi:   .byte $00, $02, $02,  $00, $01, $02
 
 
 ; -----------------------------------------------------------------------------
-;  allumer_ecran : attend un VBlank, règle le défilement, allume l'affichage
+;  eteindre_ecran / allumer_ecran
 ; -----------------------------------------------------------------------------
+eteindre_ecran:
+        lda #0
+        sta PPUCTRL             ; NMI coupée...
+        sta PPUMASK             ; ...affichage coupé : on peut redessiner
+        rts
+
 allumer_ecran:
         bit PPUSTATUS
 @attendre:
@@ -583,6 +634,73 @@ dessiner_hud:
 
 
 ; =============================================================================
+;  L'ÉCRAN TITRE — du texte dans le ciel (à dessiner/effacer écran éteint)
+; =============================================================================
+dessiner_titre_texte:
+        lda #%00000000          ; ATTENTION : charger_niveau laisse le PPU en
+        sta PPUCTRL             ; mode "colonne" (+32) ! Sans cette remise en
+        bit PPUSTATUS           ; mode "+1", le titre s'écrirait... à la
+        lda #$20                ; verticale. (Vécu aussi.)
+                                ; rangée de tuiles 7, colonne 8 (le ciel)
+        sta PPUADDR
+        lda #$E8
+        sta PPUADDR
+        ldx #0
+@nom:
+        lda texte_nom, x
+        sta PPUDATA
+        inx
+        cpx #15
+        bne @nom
+        lda #$21                ; rangée 10, colonne 8
+        sta PPUADDR
+        lda #$48
+        sta PPUADDR
+        ldx #0
+@appuie:
+        lda texte_appuie, x
+        sta PPUDATA
+        inx
+        cpx #16
+        bne @appuie
+        rts
+
+; La même chose, à l'encre invisible : Start efface le titre du ciel.
+effacer_titre_texte:
+        lda #%00000000          ; même prudence : mode "+1" d'abord
+        sta PPUCTRL
+        bit PPUSTATUS
+        lda #$20
+        sta PPUADDR
+        lda #$E8
+        sta PPUADDR
+        lda #TUILE_VIDE
+        ldx #15
+@nom:
+        sta PPUDATA
+        dex
+        bne @nom
+        lda #$21
+        sta PPUADDR
+        lda #$48
+        sta PPUADDR
+        lda #TUILE_VIDE
+        ldx #16
+@appuie:
+        sta PPUDATA
+        dex
+        bne @appuie
+        rts
+
+texte_nom:
+        .byte L_N, L_E, L_O, TIRET, L_R, L_U, L_N, L_N, L_E, L_R, ESPACE
+        .byte TUILE_CHIFFRE_0+2, TUILE_CHIFFRE_0, TUILE_CHIFFRE_0+2, TUILE_CHIFFRE_0+6
+texte_appuie:
+        .byte L_A, L_P, L_P, L_U, L_I, L_E, ESPACE, L_S, L_U, L_R, ESPACE
+        .byte L_S, L_T, L_A, L_R, L_T
+
+
+; =============================================================================
 ;  construire_colonne — fabrique en RAM les 60 tuiles d'une colonne de décor
 ; =============================================================================
 ;  Entrée : A = numéro de métacolonne (0 à 63).
@@ -715,6 +833,7 @@ principale:
         jsr attendre_nmi
         jsr maj_musique
         jsr maj_bruitages
+        jsr maj_jingle
         jsr lire_manette
 
         lda etat
@@ -733,6 +852,9 @@ principale:
         lda presses
         and #BTN_START
         beq @dessiner
+        jsr eteindre_ecran      ; on retire le titre du ciel...
+        jsr effacer_titre_texte
+        jsr allumer_ecran       ; ...et que la course commence !
         lda #ETAT_JEU
         sta etat
         jsr bip_depart
@@ -1073,10 +1195,23 @@ maj_joueur:
         lda joueur_x_lo
         cmp #BUT_LO
         bcc @fin
-        lda #ETAT_GAGNE         ; livraison accomplie !
+        ; v2 : première antenne = direction le MONDE 2. La seconde = gagné !
+        lda monde
+        cmp #2
+        beq @victoire_finale
+        inc monde
+        jsr jouer_jingle_victoire
+        lda #0                  ; écran éteint, nouveau monde, et on repart
+        sta PPUMASK             ; (exactement le même rituel que mourir)
+        sta PPUCTRL
+        jsr charger_niveau
+        jsr allumer_ecran
+        rts
+@victoire_finale:
+        lda #ETAT_GAGNE         ; les DEUX livraisons accomplies !
         sta etat
         jsr arreter_musique
-        jsr bip_victoire
+        jsr jouer_jingle_victoire
 @fin:
         rts
 
@@ -1189,6 +1324,7 @@ mourir:
         lda #ETAT_PERDU         ; plus de vies. GAME OVER, comme on disait
         sta etat                ; au siècle dernier.
         jsr arreter_musique
+        jsr jouer_jingle_defaite
         jmp bruit_fin           ; long grondement (son rts conclura)
 @rejouer:
         jsr bruit_vie           ; "pshh"
@@ -1535,6 +1671,8 @@ jouer_bruit:
         rts
 
 maj_bruitages:
+        lda jingle_actif        ; un jingle occupe le canal des bips :
+        bne @bruit              ; on ne lui coupe pas le sifflet !
         lda bip_cpt
         beq @bruit
         dec bip_cpt
@@ -1550,6 +1688,72 @@ maj_bruitages:
         sta BRUIT_VOL
 @fin:
         rts
+
+; -----------------------------------------------------------------------------
+;  LES JINGLES — de vraies petites phrases musicales pour les grands moments
+; -----------------------------------------------------------------------------
+;  Un jingle est une mini-partition (note, durée, ..., $FF) jouée sur le
+;  canal des bips : le même moteur que la musique, en 20 lignes. La fanfare
+;  du monde suivant monte, celle du game over descend — l'oreille comprend
+;  avant même de lire l'écran.
+
+jouer_jingle_victoire:
+        lda #<jingle_victoire
+        sta jingle_ptr
+        lda #>jingle_victoire
+        sta jingle_ptr+1
+        jmp lancer_jingle
+jouer_jingle_defaite:
+        lda #<jingle_defaite
+        sta jingle_ptr
+        lda #>jingle_defaite
+        sta jingle_ptr+1
+lancer_jingle:
+        lda #1
+        sta jingle_actif
+        sta jingle_cpt          ; la première note part à la prochaine image
+        lda #0
+        sta jingle_pos
+        rts
+
+maj_jingle:
+        lda jingle_actif
+        bne @actif
+        rts
+@actif:
+        dec jingle_cpt
+        beq @note_suivante
+        rts
+@note_suivante:
+        ldy jingle_pos
+        lda (jingle_ptr), y
+        cmp #$FF
+        bne @jouer
+        lda #0                  ; partition terminée : silence et rideau
+        sta jingle_actif
+        lda #%00110000
+        sta CARRE1_VOL
+        rts
+@jouer:
+        tax
+        lda notes_bas, x
+        sta CARRE1_BAS
+        lda notes_haut, x
+        ora #%11111000
+        sta CARRE1_HAUT
+        lda #%10111010
+        sta CARRE1_VOL
+        lda #$08
+        sta CARRE1_BAL
+        iny
+        lda (jingle_ptr), y
+        sta jingle_cpt
+        iny
+        sty jingle_pos
+        rts
+
+jingle_victoire: .byte NOTE_DO5, 8,  NOTE_MI5, 8,  NOTE_SOL5, 8,  NOTE_LA5, 24, $FF
+jingle_defaite:  .byte NOTE_MI5, 10, NOTE_DO5, 10, NOTE_LA4, 10, NOTE_FA4, 28, $FF
 
 ; Le catalogue des sons du jeu :
 bip_depart:                     ; Start pressé
@@ -1917,6 +2121,77 @@ niveau:
         .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 62
         .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 63
 
+; -----------------------------------------------------------------------------
+;  LE MONDE 2 — les hauts quartiers. Trous plus larges, tours plus hautes,
+;  drones aux aguets. Même format : à vous d'en dessiner un 3e !
+; -----------------------------------------------------------------------------
+niveau_2:
+        ;     ciel ................................. sol
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 0   départ
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 1
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 2
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 3
+        .byte V,V,V,V,V,V,V,V,V,V,V,P,V,N,B   ; col 4
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 5
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 6   ── un GRAND vide !
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 7
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 8
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 9   zone du drone 1
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 10
+        .byte V,V,V,V,V,V,V,V,V,P,N,V,V,N,B   ; col 11  perchoir à puce
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 12
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 13
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 14  ── le vide
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 15
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 16
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,B,N,B   ; col 17  le grand escalier...
+        .byte V,V,V,V,V,V,V,V,V,V,V,B,B,N,B   ; col 18
+        .byte V,V,V,V,V,V,V,V,P,V,B,B,B,N,B   ; col 19  ...et sa puce
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 20  le palier d'atterrissage
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 21  (souffler avant de sauter)
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 22  ── le vide
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 23
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 24  zone du drone 2
+        .byte V,V,V,V,V,V,V,V,P,V,N,V,V,N,B   ; col 25  le balcon aux 3 puces
+        .byte V,V,V,V,V,V,V,V,P,V,N,V,V,N,B   ; col 26
+        .byte V,V,V,V,V,V,V,V,P,V,N,V,V,N,B   ; col 27
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 28
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 29  ── le vide
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 30
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 31
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,B,N,B   ; col 32  la double tour...
+        .byte V,V,V,V,V,V,V,V,V,V,B,B,B,N,B   ; col 33
+        .byte V,V,V,V,V,V,P,V,B,B,B,B,B,N,B   ; col 34  ...à la puce du sommet
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 35
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 36
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 37
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 38
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 39  ── le vide
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 40
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 41  zone du drone 3
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 42
+        .byte V,V,V,V,V,V,V,V,V,P,N,V,V,N,B   ; col 43
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 44
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 45
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 46
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 47  ── le vide
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,V,V   ; col 48
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 49
+        .byte V,V,V,V,V,V,V,V,V,V,V,P,V,N,B   ; col 50
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 51
+        .byte V,V,V,V,V,V,V,V,V,V,V,P,V,N,B   ; col 52
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 53
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 54
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 55
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 56
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 57
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 58
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 59
+        .byte V,V,V,V,V,V,V,V,V,V,V,T,M,N,B   ; col 60  ★ LA DERNIÈRE ANTENNE ★
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 61
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 62
+        .byte V,V,V,V,V,V,V,V,V,V,V,V,V,N,B   ; col 63
+
 
 ; =============================================================================
 ;  LES VECTEURS
@@ -2111,5 +2386,23 @@ niveau:
         .byte %00000000
         .res 8                  ; plan 1 vide
 
+; --- $1C : le tiret (couleur 3 : les deux plans) ---------------------------------
+        TUILE_UNIE %00000000, %00000000, %00000000, %01111110, %00000000, %00000000, %00000000, %00000000
+
+; --- on saute jusqu'à $20 : l'alphabet du titre ($1D-$1F libres) ------------------
+        .res 3 * 16
+
+; --- $20-$29 : les 10 lettres de nos deux phrases (couleur 3) ---------------------
+        TUILE_UNIE %00110000, %01111000, %11001100, %11001100, %11111100, %11001100, %11001100, %00000000  ; A
+        TUILE_UNIE %11111110, %01100010, %01101000, %01111000, %01101000, %01100010, %11111110, %00000000  ; E
+        TUILE_UNIE %01111000, %00110000, %00110000, %00110000, %00110000, %00110000, %01111000, %00000000  ; I
+        TUILE_UNIE %11000110, %11100110, %11110110, %11011110, %11001110, %11000110, %11000110, %00000000  ; N
+        TUILE_UNIE %00111000, %01101100, %11000110, %11000110, %11000110, %01101100, %00111000, %00000000  ; O
+        TUILE_UNIE %11111100, %01100110, %01100110, %01111100, %01100000, %01100000, %11110000, %00000000  ; P
+        TUILE_UNIE %11111100, %01100110, %01100110, %01111100, %01101100, %01100110, %11100110, %00000000  ; R
+        TUILE_UNIE %01111000, %11001100, %11100000, %01110000, %00011100, %11001100, %01111000, %00000000  ; S
+        TUILE_UNIE %11111100, %10110100, %00110000, %00110000, %00110000, %00110000, %01111000, %00000000  ; T
+        TUILE_UNIE %11001100, %11001100, %11001100, %11001100, %11001100, %11001100, %01111100, %00000000  ; U
+
 ; Le reste des 8 Ko de graphismes est rempli de zéros par l'éditeur de liens.
-; Fin du voyage — vous savez maintenant faire défiler un monde. 🤖
+; Fin du voyage — vous savez maintenant faire défiler DEUX mondes. 🤖
