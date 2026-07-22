@@ -8,6 +8,11 @@ des tuiles pixel par pixel.
 **Aucune connaissance préalable n'est nécessaire.** Si vous savez ce qu'est
 une variable, vous pouvez suivre.
 
+> **Version 2** — le jouet est devenu un jeu d'arcade : rebonds à 5 angles,
+> capsules bonus, multiball, briques solides et dorées, niveaux à motifs,
+> écran titre avec record. Les bases (sections 1 à 4) n'ont pas changé ;
+> les nouvelles techniques ont leur section, la [4 ter](#4-ter--la-version-2--les-techniques-dun-jeu-darcade).
+
 ```
 ┌────────────────────────────────┐
 │  005                        3  │   ← score            vies ↑
@@ -23,7 +28,12 @@ une variable, vous pouvez suivre.
 ```
 
 **Commandes** : ← → pour bouger la raquette · **A** pour lancer la balle ·
-**Start** pour rejouer après une victoire ou une défaite.
+**Start** pour commencer (et revenir au titre après un game over).
+
+Frappez du bout de la raquette pour des angles rasants, au centre pour
+remonter droit. Les briques grises encaissent deux coups, les dorées valent
+5 points, et les capsules qui tombent donnent : raquette élargie, balle
+lente, vie bonus... et le MULTIBALL.
 
 ---
 
@@ -184,12 +194,15 @@ dont beaucoup de commentaires). Ordre de lecture conseillé :
 | En-tête du fichier | les instructions 6502 essentielles |
 | Constantes + variables | page zéro, registres du PPU |
 | `reset` | le rituel d'initialisation de toute cartouche NES |
-| `charger_palettes`, `dessiner_decor` | écrire dans la mémoire vidéo, calculs d'adresses sur 16 bits avec un CPU 8 bits |
-| `principale` | la boucle de jeu et la machine à états (attente / jeu / fini) |
-| `lire_manette` | lire du matériel bit par bit (l'astuce LSR/ROL) |
-| `deplacer_balle`, `collision_*` | divisions par 8 en décalant les bits, complément à deux, rebonds |
+| `charger_palettes`, `dessiner_cadre` | écrire dans la mémoire vidéo, calculs d'adresses sur 16 bits avec un CPU 8 bits, la table d'attributs |
+| `principale` | la boucle de jeu et la machine à 5 états |
+| `lire_manette` | lire du matériel bit par bit, détecter un bouton « qui vient d'être pressé » |
+| `deplacer_balle`, `collision_*` | virgule fixe 8.8, complément à deux, rebonds à 5 angles |
+| `maj_balles`, `echanger_balles` | le multiball : deux balles pour un seul moteur physique |
+| `charger_niveau`, `motif_*` | des niveaux pilotés par des données |
+| `dessiner_ecran_titre`, `maj_record` | du texte, et un record qui survit aux parties |
 | `maj_musique`, `jouer_bip`... | l'APU : jouer une partition et des bruitages (section suivante) |
-| `nmi` | le DMA des sprites, la pile, `RTI` |
+| `nmi` | le DMA des sprites, les files d'attente d'écriture vidéo, `RTI` |
 | Segment `CHR` | les graphismes dessinés octet par octet en binaire — chaque `1` est un pixel ! |
 
 Trois fichiers d'infrastructure l'accompagnent :
@@ -243,6 +256,45 @@ Trois idées à retenir en lisant le code :
 La mélodie tourne sur do / la mineur / fa / sol — le fameux enchaînement
 « I-vi-IV-V » de la moitié des tubes de l'histoire. Changez-la !
 
+### 4 ter — La version 2 : les techniques d'un jeu d'arcade
+
+Six idées ont transformé le jouet en jeu. Chacune est une leçon :
+
+- **La virgule fixe 8.8** (`balle_dx_lo`/`_hi`...). Une vitesse de
+  « 1,5 pixel par image » ne tient pas dans des entiers : on compte donc en
+  256e de pixel, sur deux octets. `$0180` = 1,5 ; `$FE80` = −1,5. C'est ce
+  qui permet les **5 zones de la raquette** (`collision_raquette`) : du bord
+  qui renvoie rasant au centre qui renvoie droit — et le jeu devient un jeu
+  de visée. Chaque zone a même sa note de musique.
+- **Le multiball, ou la magie de l'échange** (`maj_balles`,
+  `echanger_balles`). Plutôt que de dupliquer le moteur physique pour la
+  2e balle, on échange les 8 octets de la balle 2 avec ceux de la balle 1,
+  on fait tourner le moteur (qui n'y voit que du feu), et on ré-échange.
+  Possible uniquement parce que les deux blocs de variables sont déclarés
+  dans le même ordre : **en assembleur, l'ordre de déclaration est une
+  structure de données.**
+- **Des entités typées dans la grille**. Une case ne dit plus « brique ou
+  pas » mais porte un TYPE (normale, solide, dorée, fissurée) qui pilote
+  tout : tuiles affichées, points, résistance. La brique solide touchée
+  n'est pas effacée mais *redessinée fissurée* — la file d'attente de la
+  nmi transporte désormais les tuiles à écrire, pas juste une adresse.
+- **La table d'attributs** (`dessiner_cadre`). Les 64 derniers octets de la
+  nametable choisissent la palette de chaque carré de 4×4 tuiles. Deux
+  rangées d'attributs couvrent pile la zone des briques : on y active la
+  palette 1, et les briques dorées deviennent... dorées, sans toucher au
+  blanc des chiffres.
+- **Des niveaux pilotés par les données** (`charger_niveau`, `motif_*`).
+  Le code ne connaît aucun niveau : il copie un motif de 96 octets depuis
+  la ROM et le dessine. Quatre motifs lisibles en toutes lettres (V, N, S,
+  D) dans le source, qui bouclent de plus en plus vite. Ajouter un niveau
+  = dessiner un tableau.
+- **Le cycle de vie des données** (`reset` vs `demarrer_partie`). Le record
+  doit survivre d'une partie à l'autre : le jeu ne repasse donc plus JAMAIS
+  par le reset entre deux parties. Allumer la console et commencer une
+  partie sont deux choses différentes — c'est ce qui rend possible l'écran
+  titre, son RECORD, et le « GAME OVER » écrit à l'écran avec notre
+  alphabet de 16 lettres dessiné dans la CHR-ROM.
+
 ---
 
 ## 5. Exercices
@@ -252,27 +304,31 @@ Du plus facile au plus costaud. Recompilez avec `make` après chaque essai.
 1. **Les couleurs** — dans la table `palettes`, remplacez `$27` (orange des
    briques) par une autre valeur `$00-$3C`. La palette complète de la NES est
    sur [le wiki NESdev](https://www.nesdev.org/wiki/PPU_palettes).
-2. **La raquette turbo** — dans `maj_raquette`, changez les `#2` en `#4`.
-   Pourquoi faut-il aussi ajuster la valeur du blocage à droite ?
-3. **Le pixel-art** — dans le segment `CHR`, redessinez la balle (tuile
+2. **Le pixel-art** — dans le segment `CHR`, redessinez la balle (tuile
    `$04`) en modifiant les `%00111100`... Chaque `1` est un pixel allumé.
-4. **Score gourmand** — faites rapporter 10 points par brique au lieu de 1
-   (indice : dans `incrementer_score`, il suffit de commencer par les
-   dizaines).
-5. **Une vie de plus** — 4 vies au départ. Un seul octet à changer !
-6. **Des angles de rebond** — la raquette est coupée en 2 moitiés
-   (`collision_raquette`). Coupez-la en 4 zones : les bords renvoient la
-   balle avec `dx = ±3`, le centre avec `dx = ±1`. (Attention : avec dx=3,
-   vérifiez vos bornes de rebond sur les murs !)
-7. **Compositeur** — changez la table `melodie` (note, durée, note,
-   durée..., `$FF` pour boucler). Ajoutez une note à la gamme : calculez sa
-   période avec la formule du source, ajoutez-la aux tables
-   `notes_bas`/`notes_haut` et sa constante `NOTE_...`. Essayez aussi de
-   changer le *timbre* : les 2 bits du haut de `CARRE2_VOL` (le « duty »)
-   transforment le son du tout au tout ([doc APU](https://www.nesdev.org/wiki/APU_basics)).
-8. **Niveau 2** — quand `briques_restantes` tombe à 0, au lieu de figer le
-   jeu, redessinez les briques et remontez la vitesse. Il faudra le faire
-   écran éteint (`PPUMASK = 0`) ou par petits paquets pendant les VBlank...
+3. **Level designer** — ajoutez un 5e motif de niveau : un tableau de
+   6×16 lettres (V, N, S, D), une entrée dans `motifs_lo`/`motifs_hi`, et
+   le modulo dans `charger_niveau` à passer de `#%00000011` à... réfléchissez :
+   pourquoi un simple AND ne suffit-il plus pour « modulo 5 » ?
+4. **Vos angles à vous** — les tables `zones_dx_*`/`zones_dy_*` sont les
+   réglages de jeu les plus sensibles du fichier. Essayez des bords plus
+   rasants (dx = ±2,5), un centre parfaitement vertical (dx = 0 — mais que
+   devient la partie si la balle monte tout droit pour toujours ?).
+5. **La 5e capsule** — une capsule « malus » qui RÉTRÉCIT la raquette
+   (2 segments au lieu de 3) ! Il faut : une constante, une tuile, une
+   entrée dans `tuiles_capsules`, un cas dans `maj_capsule`, une minuterie,
+   et adapter `maj_sprites` + la butée droite + la largeur d'attrape.
+6. **Compositeur** — changez la table `melodie` (note, durée, ..., `$FF`
+   pour boucler). Ajoutez une note : calculez sa période avec la formule du
+   source, ajoutez-la aux tables `notes_bas`/`notes_haut`. Et changez le
+   *timbre* : les 2 bits du haut de `CARRE2_VOL` (le « duty ») transforment
+   le son du tout au tout ([doc APU](https://www.nesdev.org/wiki/APU_basics)).
+7. **Triple ball** — le multiball ne gère que 2 balles... ajoutez la 3e.
+   `echanger_balles` et `maj_balles` vous montrent le chemin ; la vraie
+   question est : comment savoir quelle vie perdre quand *laquelle* tombe ?
+8. **RECORD clignotant** — quand le score final BAT le record, faites
+   clignoter la ligne RECORD de l'écran titre (indice : le compteur
+   `image` et un bit bien choisi, comme pour la balle du game over).
 
 ---
 
