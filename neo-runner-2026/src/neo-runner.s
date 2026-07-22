@@ -55,8 +55,25 @@ PPUSCROLL = $2005
 PPUADDR   = $2006
 PPUDATA   = $2007
 OAMDMA    = $4014
+APUSTATUS = $4015
 JOYPAD1   = $4016
 APUFRAME  = $4017
+
+; --- Les registres du son (voir le casse-brique pour le cours complet) --------
+CARRE1_VOL  = $4000 ; canal carré 1 : les bruitages
+CARRE1_BAL  = $4001
+CARRE1_BAS  = $4002
+CARRE1_HAUT = $4003
+CARRE2_VOL  = $4004 ; canal carré 2 : la mélodie
+CARRE2_BAL  = $4005
+CARRE2_BAS  = $4006
+CARRE2_HAUT = $4007
+TRI_LIN     = $4008 ; canal triangle : la basse
+TRI_BAS     = $400A
+TRI_HAUT    = $400B
+BRUIT_VOL   = $400C ; canal de bruit : chocs et catastrophes
+BRUIT_PER   = $400E
+BRUIT_LON   = $400F
 
 BTN_A      = %10000000
 BTN_B      = %01000000
@@ -72,9 +89,12 @@ TUILE_VIDE       = $00
 TUILE_BLOC       = $01   ; béton d'immeuble, fenêtres allumées
 TUILE_NEON       = $02   ; bord néon des toits et plateformes
 TUILE_ROBOT_HAUT = $08
-TUILE_ROBOT_BAS  = $09
-TUILE_DRONE      = $0A
+TUILE_ROBOT_BAS  = $09   ; jambes serrées (pose 1)
+TUILE_DRONE      = $0A   ; rotors, phase 1
+TUILE_ROBOT_BAS2 = $0F   ; jambes écartées (pose 2 : la course !)
 TUILE_CHIFFRE_0  = $10
+TUILE_DRONE2     = $1A   ; rotors, phase 2
+TUILE_ICONE_PUCE = $1B   ; le petit losange du bandeau de score
 
 ; --- Les types de métatuiles (les "blocs" de 16×16 dont est fait le niveau) ---
 TYPE_VIDE    = 0
@@ -89,6 +109,23 @@ ETAT_TITRE = 0     ; on attend Start (le robot clignote)
 ETAT_JEU   = 1
 ETAT_PERDU = 2
 ETAT_GAGNE = 3
+
+; --- Les notes de musique (mêmes tables que le casse-brique) --------------------
+NOTE_SILENCE = 0
+NOTE_FA2  = 1
+NOTE_SOL2 = 2
+NOTE_LA2  = 3
+NOTE_DO3  = 4
+NOTE_FA4  = 5
+NOTE_SOL4 = 6
+NOTE_LA4  = 7
+NOTE_SI4  = 8
+NOTE_DO5  = 9
+NOTE_RE5  = 10
+NOTE_MI5  = 11
+NOTE_FA5  = 12
+NOTE_SOL5 = 13
+NOTE_LA5  = 14
 
 ; --- Physique (en virgule fixe 8.8 : 256 = un pixel) ---------------------------
 GRAVITE    = $40       ; +0,25 pixel/image² — ce qui nous tire vers le bas
@@ -166,6 +203,15 @@ drone_y:       .res 3
 drone_dir:     .res 3   ; +1 ou $FF (−1)
 drone_actif:   .res 3   ; 0 = détruit
 
+; Le moteur de musique et les bruitages (voir le casse-brique)
+mus_active:    .res 1
+mel_pos:       .res 1
+mel_cpt:       .res 1
+bas_pos:       .res 1
+bas_cpt:       .res 1
+bip_cpt:       .res 1
+bruit_cpt:     .res 1
+
 
 ; -----------------------------------------------------------------------------
 ;  VARIABLES en RAM ordinaire
@@ -177,7 +223,9 @@ drone_actif:   .res 3   ; 0 = détruit
 .bss
 
 carte:          .res 1024  ; 64 colonnes × 16 (15 rangées + 1 de bourrage)
-tampon_colonne: .res 60    ; les 60 tuiles d'une colonne de décor à écrire
+tampon_colonne: .res 52    ; les 52 tuiles d'une colonne de décor à écrire
+                           ; (26 par colonne de tuiles : les rangées 0-3 de
+                           ;  l'écran appartiennent au bandeau de score !)
 
 
 ; =============================================================================
@@ -242,6 +290,11 @@ reset:
         sta etat
 
         jsr charger_niveau      ; copie la carte et dessine les 2 premiers écrans
+
+        lda #%00001111          ; ouvre les 4 canaux du son...
+        sta APUSTATUS
+        jsr demarrer_musique    ; ...et en musique !
+
         jsr allumer_ecran
         jmp principale
 
@@ -265,15 +318,16 @@ charger_palettes:
         rts
 
 palettes:
-        ; --- fond ---
-        .byte $0F, $00, $2C, $28   ; nuit, béton gris, néon cyan, or des puces
-        .byte $0F, $0F, $0F, $0F
-        .byte $0F, $0F, $0F, $0F
+        ; --- fond : cette fois, PLUSIEURS palettes, choisies par la table
+        ;     d'attributs (voir dessiner_hud) ! -------------------------------
+        .byte $0F, $00, $2C, $28   ; palette 0 : quartier au néon CYAN
+        .byte $0F, $00, $25, $28   ; palette 1 : quartier au néon ROSE
+        .byte $0F, $28, $2C, $30   ; palette 2 : le bandeau (or, cyan, blanc)
         .byte $0F, $0F, $0F, $0F
         ; --- sprites ---
         .byte $0F, $30, $16, $0F   ; palette 0 : robot blanc, visière rouge
         .byte $0F, $2C, $15, $0F   ; palette 1 : drone cyan, œil rouge
-        .byte $0F, $00, $00, $30   ; palette 2 : chiffres du score (blanc)
+        .byte $0F, $0F, $0F, $0F
         .byte $0F, $0F, $0F, $0F
 
 
@@ -323,7 +377,10 @@ charger_niveau:
         dex
         bne @colonne
 
-        ; --- 2) Dessiner les 32 premières colonnes (écrans 1 et 2) ----------
+        ; --- 2) Le bandeau de score et les tables d'attributs ----------------
+        jsr dessiner_hud
+
+        ; --- 3) Dessiner les 32 premières colonnes (écrans 1 et 2) ----------
         lda #0
         sta compteur
 @dessiner:
@@ -335,7 +392,7 @@ charger_niveau:
         cmp #32
         bne @dessiner
 
-        ; --- 3) Tout le monde au départ --------------------------------------
+        ; --- 4) Tout le monde au départ --------------------------------------
         lda #0
         sta camera_lo
         sta camera_hi
@@ -400,6 +457,132 @@ allumer_ecran:
 
 
 ; =============================================================================
+;  dessiner_hud — le bandeau de score et les TABLES D'ATTRIBUTS
+; =============================================================================
+;  Le bandeau occupe les rangées de tuiles 0 à 3 de la nametable A : une
+;  icône de puce, le score, une tête de robot, les vies, et une barre néon
+;  en rangée 3. C'est du DÉCOR, pas des sprites — l'astuce du "sprite 0"
+;  dans la nmi le maintiendra immobile pendant que le monde défile dessous.
+;
+;  On règle aussi enfin les TABLES D'ATTRIBUTS (les 64 derniers octets de
+;  chaque nametable), ignorées jusqu'ici. Chaque octet y choisit la palette
+;  de fond d'un carré de 4×4 tuiles, à raison de 2 bits par quart de carré :
+;  %10101010 = "palette 2 partout", %01010101 = "palette 1 partout".
+;  Résultat : le bandeau a ses couleurs, et chaque écran du niveau devient
+;  un "quartier" à la couleur de néon différente — cyan (A), rose (B) !
+
+dessiner_hud:
+        ; --- nametable A, rangées 0-3 : le bandeau ---------------------------
+        bit PPUSTATUS
+        lda #$20
+        sta PPUADDR
+        lda #$00
+        sta PPUADDR
+        lda #TUILE_VIDE         ; rangée 0 : vide
+        ldx #32
+@rangee0:
+        sta PPUDATA
+        dex
+        bne @rangee0
+        ldx #4                  ; rangée 1 : 4 cases vides...
+@rangee1a:
+        sta PPUDATA
+        dex
+        bne @rangee1a
+        lda #TUILE_ICONE_PUCE   ; ...l'icône des puces...
+        sta PPUDATA
+        lda #TUILE_CHIFFRE_0    ; ...le score "000"...
+        sta PPUDATA
+        sta PPUDATA
+        sta PPUDATA
+        lda #TUILE_VIDE
+        ldx #16
+@rangee1b:
+        sta PPUDATA
+        dex
+        bne @rangee1b
+        lda #TUILE_ROBOT_HAUT   ; ...la tête du robot...
+        sta PPUDATA
+        lda vies                ; ...et le nombre de vies
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+        lda #TUILE_VIDE
+        ldx #6
+@rangee1c:
+        sta PPUDATA
+        dex
+        bne @rangee1c
+        ldx #32                 ; rangée 2 : vide
+@rangee2:
+        sta PPUDATA
+        dex
+        bne @rangee2
+        lda #TUILE_NEON         ; rangée 3 : la barre lumineuse
+        ldx #32
+@rangee3:
+        sta PPUDATA
+        dex
+        bne @rangee3
+
+        ; --- nametable B, rangées 0-3 : jamais visibles... sauf la barre -----
+        ;  (en fin de bandeau le défilement a déjà basculé : sans cette
+        ;   copie de la rangée 3, la barre serait rognée un écran sur deux)
+        lda #$24
+        sta PPUADDR
+        lda #$00
+        sta PPUADDR
+        lda #TUILE_VIDE
+        ldx #96                 ; rangées 0-2
+@rangees_b:
+        sta PPUDATA
+        dex
+        bne @rangees_b
+        lda #TUILE_NEON
+        ldx #32
+@rangee3_b:
+        sta PPUDATA
+        dex
+        bne @rangee3_b
+
+        ; --- attributs de la nametable A : bandeau pal.2, quartier pal.0 -----
+        lda #$23
+        sta PPUADDR
+        lda #$C0
+        sta PPUADDR
+        lda #%10101010          ; 1re rangée d'attributs = les tuiles 0-3 :
+        ldx #8                  ; pile la hauteur du bandeau. Bien joué, non ?
+@attr_a1:
+        sta PPUDATA
+        dex
+        bne @attr_a1
+        lda #%00000000          ; le reste : palette 0 (quartier cyan)
+        ldx #56
+@attr_a2:
+        sta PPUDATA
+        dex
+        bne @attr_a2
+        ; --- attributs de la nametable B : bandeau pal.2, quartier pal.1 -----
+        lda #$27
+        sta PPUADDR
+        lda #$C0
+        sta PPUADDR
+        lda #%10101010
+        ldx #8
+@attr_b1:
+        sta PPUDATA
+        dex
+        bne @attr_b1
+        lda #%01010101          ; palette 1 (quartier rose)
+        ldx #56
+@attr_b2:
+        sta PPUDATA
+        dex
+        bne @attr_b2
+        rts
+
+
+; =============================================================================
 ;  construire_colonne — fabrique en RAM les 60 tuiles d'une colonne de décor
 ; =============================================================================
 ;  Entrée : A = numéro de métacolonne (0 à 63).
@@ -426,8 +609,10 @@ construire_colonne:
         stx col_adr_hi
         lda meta_tmp
         and #%00001111          ; position dans l'écran (0-15)...
-        asl a                   ; ...×2 tuiles par métatuile
-        sta col_adr_lo
+        asl a                   ; ...×2 tuiles par métatuile...
+        clc
+        adc #$80                ; ...+ 4 rangées × 32 : on écrit SOUS le
+        sta col_adr_lo          ;    bandeau (rangées 4 à 29)
 
         ; --- pointeur vers la colonne dans la carte ---------------------------
         ;  adresse = $0300 + colonne × 16. Or colonne×16, c'est juste ses bits
@@ -447,23 +632,27 @@ construire_colonne:
         asl a
         sta carte_ptr
 
-        ; --- traduire les 15 métatuiles en 60 tuiles --------------------------
-        ldy #0                  ; Y = rangée (0-14)
+        ; --- traduire les métatuiles en tuiles ---------------------------------
+        ;  Les rangées 0 et 1 de la carte (tuiles 0-3 de l'écran) sont
+        ;  cachées derrière le bandeau : on ne dessine que les rangées 2-14.
+        ldy #2                  ; Y = rangée (2-14)
 @rangee:
         sty rang_tmp
         lda (carte_ptr), y      ; le TYPE de la métatuile
         tax                     ; → X, pour indexer les tables de tuiles
         lda rang_tmp
+        sec
+        sbc #2                  ; position dans le tampon = (rangée−2)×2
         asl a
-        tay                     ; Y = rangée × 2 = position dans le tampon
+        tay
         lda metatuile_hg, x     ; les 4 coins de la métatuile :
         sta tampon_colonne, y   ;   haut-gauche
         lda metatuile_bg, x
         sta tampon_colonne+1, y ;   bas-gauche
         lda metatuile_hd, x
-        sta tampon_colonne+30, y ;  haut-droit
+        sta tampon_colonne+26, y ;  haut-droit
         lda metatuile_bd, x
-        sta tampon_colonne+31, y ;  bas-droit
+        sta tampon_colonne+27, y ;  bas-droit
         ldy rang_tmp
         iny
         cpy #15
@@ -502,7 +691,7 @@ ecrire_colonne:
         lda tampon_colonne, x
         sta PPUDATA
         inx
-        cpx #30
+        cpx #26
         bne @gauche
         lda col_adr_hi          ; seconde colonne de tuiles, une case à droite
         sta PPUADDR
@@ -514,7 +703,7 @@ ecrire_colonne:
         lda tampon_colonne, x
         sta PPUDATA
         inx
-        cpx #60
+        cpx #52
         bne @droite
         rts
 
@@ -524,6 +713,8 @@ ecrire_colonne:
 ; =============================================================================
 principale:
         jsr attendre_nmi
+        jsr maj_musique
+        jsr maj_bruitages
         jsr lire_manette
 
         lda etat
@@ -544,6 +735,7 @@ principale:
         beq @dessiner
         lda #ETAT_JEU
         sta etat
+        jsr bip_depart
         jmp @dessiner
 
 @en_jeu:
@@ -852,6 +1044,7 @@ maj_joueur:
         sta vy_hi               ; la chute — une jolie parabole, sans sinus
         lda #0                  ; ni multiplication !
         sta au_sol
+        jsr bip_saut
 @pas_de_saut:
 
         ; ============== UNE PUCE ? ==============
@@ -882,6 +1075,8 @@ maj_joueur:
         bcc @fin
         lda #ETAT_GAGNE         ; livraison accomplie !
         sta etat
+        jsr arreter_musique
+        jsr bip_victoire
 @fin:
         rts
 
@@ -930,6 +1125,7 @@ ramasser_puce:
         lda #0                  ; effacer de la carte (type_carte vient de
         tay                     ; laisser carte_ptr pile sur la bonne case)
         sta (carte_ptr), y
+        jsr bip_puce            ; cling !
 
         inc score_d             ; +10 points, chiffre par chiffre
         lda score_d
@@ -992,8 +1188,10 @@ mourir:
         bne @rejouer
         lda #ETAT_PERDU         ; plus de vies. GAME OVER, comme on disait
         sta etat                ; au siècle dernier.
-        rts
+        jsr arreter_musique
+        jmp bruit_fin           ; long grondement (son rts conclura)
 @rejouer:
+        jsr bruit_vie           ; "pshh"
         lda #0                  ; on éteint TOUT (affichage et NMI) : on va
         sta PPUMASK             ; redessiner les nametables hors VBlank, ce
         sta PPUCTRL             ; qui est interdit écran allumé
@@ -1189,6 +1387,7 @@ maj_drones:
         sta vy_lo
         lda #$FD                ; ...et le robot rebondit (vitesse −3)
         sta vy_hi
+        jsr bruit_ecrase        ; "crounch" (X n'est pas abîmé, ouf)
         jmp @suivant
 @fatal:
         jmp mourir              ; le rts de mourir renverra à la boucle
@@ -1202,10 +1401,210 @@ maj_drones:
 
 
 ; =============================================================================
+;  LE SON — même moteur que le casse-brique (le cours détaillé est là-bas)
+; =============================================================================
+;  Carré 2 = mélodie, triangle = basse, carré 1 = bips, bruit = chocs.
+
+demarrer_musique:
+        lda #1
+        sta mus_active
+        sta mel_cpt             ; "1 image restante" : la première note
+        sta bas_cpt             ; partira dès la prochaine mise à jour
+        lda #0
+        sta mel_pos
+        sta bas_pos
+        rts
+
+arreter_musique:
+        lda #0
+        sta mus_active
+        lda #%00110000          ; volume 0 sur la mélodie...
+        sta CARRE2_VOL
+        lda #%10000000          ; ...et compteur linéaire à 0 : le triangle
+        sta TRI_LIN             ; se taira tout seul
+        rts
+
+maj_musique:
+        lda mus_active
+        bne @active
+        rts
+@active:
+        ; ---------- la MÉLODIE, sur le canal carré 2 ----------
+        dec mel_cpt
+        bne @basse              ; la note en cours n'est pas finie
+        ldx mel_pos
+        lda melodie, x
+        cmp #$FF                ; $FF = fin de la partition...
+        bne @note_lue
+        ldx #0                  ; ...alors on reboucle
+        lda melodie, x
+@note_lue:
+        beq @soupir             ; note 0 = un silence
+        tay
+        lda #%10110110          ; onde carrée 50 %, volume 6
+        sta CARRE2_VOL
+        lda #$08
+        sta CARRE2_BAL          ; neutralise le balayage automatique
+        lda notes_bas, y
+        sta CARRE2_BAS
+        lda notes_haut, y
+        ora #%11111000
+        sta CARRE2_HAUT
+        jmp @duree
+@soupir:
+        lda #%00110000
+        sta CARRE2_VOL
+@duree:
+        inx
+        lda melodie, x          ; l'octet suivant est la durée en images
+        sta mel_cpt
+        inx
+        stx mel_pos
+
+@basse:
+        ; ---------- la BASSE, sur le canal triangle ----------
+        dec bas_cpt
+        bne @fin
+        ldx bas_pos
+        lda basse, x
+        cmp #$FF
+        bne @basse_lue
+        ldx #0
+        lda basse, x
+@basse_lue:
+        tay
+        lda #%11111111          ; compteur linéaire au maximum : joue !
+        sta TRI_LIN
+        lda notes_bas, y
+        sta TRI_BAS
+        lda notes_haut, y
+        ora #%11111000
+        sta TRI_HAUT
+        inx
+        lda basse, x
+        sta bas_cpt
+        inx
+        stx bas_pos
+@fin:
+        rts
+
+; -----------------------------------------------------------------------------
+;  LA PARTITION — des arpèges qui descendent : l'ambiance nocturne de 2026.
+;  Quatre mesures sur la mineur / fa / do / sol. À vous de la remixer !
+; -----------------------------------------------------------------------------
+melodie:
+        .byte NOTE_MI5, 12, NOTE_DO5,  12, NOTE_LA4, 12, NOTE_DO5, 12
+        .byte NOTE_DO5, 12, NOTE_LA4,  12, NOTE_FA4, 12, NOTE_LA4, 12
+        .byte NOTE_MI5, 12, NOTE_SOL5, 12, NOTE_MI5, 12, NOTE_DO5, 12
+        .byte NOTE_RE5, 12, NOTE_SI4,  12, NOTE_SOL4, 12, NOTE_SI4, 12
+        .byte $FF
+
+basse:
+        .byte NOTE_LA2, 48, NOTE_FA2, 48, NOTE_DO3, 48, NOTE_SOL2, 48
+        .byte $FF
+
+; Les périodes des notes : période = 1 789 773 ÷ (16 × Hz) − 1.
+;                 sil  fa2  sol2 la2  do3  fa4  sol4 la4  si4  do5  ré5  mi5  fa5  sol5 la5
+notes_bas:  .byte $00, $00, $74, $F8, $56, $3F, $1C, $FD, $E1, $D5, $BD, $A9, $9F, $8E, $7E
+notes_haut: .byte $00, $05, $04, $03, $03, $01, $01, $00, $00, $00, $00, $00, $00, $00, $00
+
+; -----------------------------------------------------------------------------
+;  LES BRUITAGES
+; -----------------------------------------------------------------------------
+; A = période octet bas, X = période octet haut, Y = durée en images
+jouer_bip:
+        sta CARRE1_BAS
+        txa
+        ora #%11111000
+        sta CARRE1_HAUT
+        lda #%10111010          ; onde carrée 50 %, volume 10
+        sta CARRE1_VOL
+        lda #$08
+        sta CARRE1_BAL
+        sty bip_cpt
+        rts
+
+; A = période du bruit (0 = aigu ... 15 = grave), Y = durée en images
+jouer_bruit:
+        sta BRUIT_PER
+        lda #%00111010          ; volume 10
+        sta BRUIT_VOL
+        lda #%11111000
+        sta BRUIT_LON
+        sty bruit_cpt
+        rts
+
+maj_bruitages:
+        lda bip_cpt
+        beq @bruit
+        dec bip_cpt
+        bne @bruit
+        lda #%00110000          ; fini : volume 0
+        sta CARRE1_VOL
+@bruit:
+        lda bruit_cpt
+        beq @fin
+        dec bruit_cpt
+        bne @fin
+        lda #%00110000
+        sta BRUIT_VOL
+@fin:
+        rts
+
+; Le catalogue des sons du jeu :
+bip_depart:                     ; Start pressé
+        lda #$FD
+        ldx #$00                ; la4
+        ldy #4
+        jmp jouer_bip
+bip_saut:                       ; hop !
+        lda #$1C
+        ldx #$01                ; sol4, bref
+        ldy #3
+        jmp jouer_bip
+bip_puce:                       ; cling ! aigu
+        lda #$6A
+        ldx #$00                ; ≈ do6
+        ldy #4
+        jmp jouer_bip
+bip_victoire:                   ; la grande note de la livraison accomplie
+        lda #$7E
+        ldx #$00                ; la5
+        ldy #40
+        jmp jouer_bip
+bruit_ecrase:                   ; "crounch" : un drone de moins
+        lda #$04
+        ldy #8
+        jmp jouer_bruit
+bruit_vie:                      ; "pshh" : une vie s'envole
+        lda #$0A
+        ldy #20
+        jmp jouer_bruit
+bruit_fin:                      ; long grondement de game over
+        lda #$0C
+        ldy #45
+        jmp jouer_bruit
+
+
+; =============================================================================
 ;  maj_sprites — le brouillon des sprites ($0200), envoyé par la nmi
 ; =============================================================================
 maj_sprites:
-        ; --- le robot (2 sprites empilés : tête + corps) ----------------------
+        ; --- Sprite 0 : "l'espion" du bandeau ---------------------------------
+        ;  Un sprite opaque, glissé DERRIÈRE le décor (bit 5 des attributs) :
+        ;  invisible, mais le PPU signale l'instant précis où l'un de ses
+        ;  pixels croise un pixel du fond — pile au bas du bandeau. La nmi
+        ;  guette ce signal pour changer le défilement en pleine image !
+        lda #23                 ; dernière ligne du bandeau
+        sta $0200
+        lda #TUILE_BLOC         ; opaque de bord en bord
+        sta $0201
+        lda #%00100000          ; priorité : derrière le décor
+        sta $0202
+        lda #120
+        sta $0203
+
+        ; --- Le robot (2 sprites empilés : tête + corps) ----------------------
         ; Hors jeu (titre, perdu, gagné), il clignote : on le cache une
         ; image sur 32, selon un bit du compteur d'images.
         lda etat
@@ -1215,40 +1614,58 @@ maj_sprites:
         and #%00010000
         beq @robot_visible
         lda #$F0                ; hop, hors écran
-        sta $0200
         sta $0204
+        sta $0208
         jmp @drones
 @robot_visible:
         lda joueur_y
-        sta $0200               ; Y de la tête
+        sta $0204               ; Y de la tête
         clc
         adc #8
-        sta $0204               ; Y du corps, 8 pixels plus bas
+        sta $0208               ; Y du corps, 8 pixels plus bas
         lda #TUILE_ROBOT_HAUT
-        sta $0201
-        lda #TUILE_ROBOT_BAS
         sta $0205
+
+        ; L'ANIMATION : en l'air, jambes écartées ; au sol, on alterne les
+        ; deux poses toutes les 8 images quand on court. Une animation, ce
+        ; n'est QUE ça : changer un numéro de tuile au bon rythme !
+        lda au_sol
+        beq @jambes_ecartees    ; en plein saut
+        lda boutons
+        and #BTN_GAUCHE|BTN_DROITE
+        beq @jambes_serrees     ; immobile
+        lda image
+        and #%00001000          ; le bit 3 du compteur d'images bat la mesure
+        beq @jambes_serrees
+@jambes_ecartees:
+        lda #TUILE_ROBOT_BAS2
+        bne @poser_jambes       ; (toujours pris : A n'est jamais nul ici)
+@jambes_serrees:
+        lda #TUILE_ROBOT_BAS
+@poser_jambes:
+        sta $0209
+
         ldx #%00000000          ; attributs : palette 0...
         lda regard
         beq @attributs
         ldx #%01000000          ; ...plus le miroir horizontal si on regarde
 @attributs:                     ;    à gauche (bit 6 : le PPU retourne la
-        stx $0202               ;    tuile tout seul, gratuitement !)
-        stx $0206
+        stx $0206               ;    tuile tout seul, gratuitement !)
+        stx $020A
         lda joueur_x_lo         ; position À L'ÉCRAN = monde − caméra.
         sec                     ; Le joueur est toujours à moins de 256 px de
         sbc camera_lo           ; la caméra : l'octet bas suffit, le reste
-        sta $0203               ; de la soustraction s'annule tout seul.
-        sta $0207
+        sta $0207               ; de la soustraction s'annule tout seul.
+        sta $020B
 
 @drones:
         ldx #2
 @un_drone:
-        txa                     ; adresse OAM du sprite 2+X : 8 + X×4
+        txa                     ; adresse OAM du sprite 3+X : 12 + X×4
         asl a
         asl a
         clc
-        adc #8
+        adc #12
         tay                     ; Y = décalage dans la page des sprites
         lda drone_actif, x
         beq @cacher
@@ -1261,7 +1678,14 @@ maj_sprites:
         bne @cacher
         lda drone_y, x
         sta $0200, y
+        lda image               ; les rotors tournent : deux tuiles
+        and #%00000100          ; alternées toutes les 4 images
+        beq @rotors_1
+        lda #TUILE_DRONE2
+        bne @rotors_ok
+@rotors_1:
         lda #TUILE_DRONE
+@rotors_ok:
         sta $0201, y
         lda drone_dir, x        ; le drone regarde là où il va
         bmi @vers_gauche
@@ -1280,41 +1704,9 @@ maj_sprites:
 @drone_suivant:
         dex
         bpl @un_drone
-
-        ; --- le tableau de bord (des sprites, eux ne défilent pas !) ----------
-        lda #23
-        sta $0214               ; Y des 3 chiffres du score et du chiffre
-        sta $0218               ; des vies
-        sta $021C
-        sta $0220
-        lda score_c
-        clc
-        adc #TUILE_CHIFFRE_0
-        sta $0215
-        lda score_d
-        clc
-        adc #TUILE_CHIFFRE_0
-        sta $0219
-        lda #TUILE_CHIFFRE_0    ; les unités : toujours "0" (10 pts la puce)
-        sta $021D
-        lda vies
-        clc
-        adc #TUILE_CHIFFRE_0
-        sta $0221
-        lda #%00000010          ; palette 2 (blanc)
-        sta $0216
-        sta $021A
-        sta $021E
-        sta $0222
-        lda #16
-        sta $0217
-        lda #24
-        sta $021B
-        lda #32
-        sta $021F
-        lda #232
-        sta $0223
         rts
+        ; (le score et les vies ne sont plus des sprites : ce sont de vraies
+        ;  tuiles du bandeau — voir dessiner_hud, et leur mise à jour dans nmi)
 
 
 ; =============================================================================
@@ -1341,7 +1733,7 @@ nmi:
 
         lda puce_actif          ; 3) une puce à effacer ? (4 tuiles : deux en
         beq @pas_de_puce        ;    haut, deux en bas, 32 cases plus loin)
-        lda #%00000000          ; retour au mode "avancer d'une case"
+        lda #%10000000          ; retour au mode "avancer d'une case"
         sta PPUCTRL
         bit PPUSTATUS
         lda puce_adr_hi
@@ -1366,16 +1758,63 @@ nmi:
         sta puce_actif
 @pas_de_puce:
 
-        ; 4) LE DÉFILEMENT — deux octets qui font tout le travail :
-        ;    PPUSCROLL reçoit le décalage horizontal (0-255), et le bit 0 de
-        ;    PPUCTRL choisit la nametable de départ (A ou B). À eux deux, ils
-        ;    couvrent 512 pixels ; nos colonnes fraîchement écrites font le
-        ;    reste. C'est TOUT le secret du défilement à la Mario.
+        ; 4) Les compteurs du bandeau (score et vies, en tuiles de décor)
+        lda #%10000000          ; mode "avancer d'une case"
+        sta PPUCTRL
         bit PPUSTATUS
+        lda #$20
+        sta PPUADDR
+        lda #$25                ; $2025 = rangée 1, colonnes 5-7 : le score
+        sta PPUADDR
+        lda score_c
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+        lda score_d
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+        lda #TUILE_CHIFFRE_0    ; unités : toujours "0" (10 points la puce)
+        sta PPUDATA
+        lda #$20
+        sta PPUADDR
+        lda #$39                ; $2039 = rangée 1, colonne 25 : les vies
+        sta PPUADDR
+        lda vies
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+
+        ; 5) LE DÉFILEMENT EN DEUX TEMPS — l'astuce du SPRITE 0.
+        ;    Problème : si on décale toute l'image, le bandeau de score
+        ;    défile aussi ! La solution, celle de Super Mario Bros. :
+        ;      a) on commence l'image SANS défilement → le PPU dessine le
+        ;         bandeau (rangées 0-3 de la nametable A) bien droit ;
+        ;      b) le sprite 0 est posé sur la dernière ligne du bandeau ;
+        ;         quand le PPU l'y dessine, il lève un drapeau (bit 6 de
+        ;         PPUSTATUS) : "je suis en train de peindre la ligne 24 !" ;
+        ;      c) on change ALORS le défilement, en pleine image : tout ce
+        ;         qui reste à peindre en dessous, c'est le monde, décalé.
+        bit PPUSTATUS           ; a) bandeau : défilement (0,0), nametable A
+        lda #0
+        sta PPUSCROLL
+        sta PPUSCROLL
+        lda #%10000000
+        sta PPUCTRL
+        ; b) attendre... D'abord que le drapeau de l'image PRÉCÉDENTE
+        ;    retombe (il ne se baisse qu'à la toute fin du VBlank) :
+@drapeau_retombe:
+        bit PPUSTATUS           ; BIT copie le bit 6 dans l'indicateur V...
+        bvs @drapeau_retombe    ; ...testable par BVS/BVC. Sur mesure !
+        ; ...puis que le sprite 0 soit touché sur CETTE image :
+@drapeau_leve:
+        bit PPUSTATUS
+        bvc @drapeau_leve
+        ; c) et hop : le reste de l'image défile avec la caméra
         lda camera_lo
         sta PPUSCROLL
         lda #0
-        sta PPUSCROLL           ; pas de défilement vertical
+        sta PPUSCROLL
         lda camera_hi
         and #1
         ora #%10000000
@@ -1613,8 +2052,23 @@ niveau:
         .byte %00000000, %00000000, %00000000, %00000000, %00000000, %00000000, %11000000, %11110000  ; $0E plan 0
         .byte %10000000, %10000000, %10000000, %10000000, %10000000, %10000000, %11000000, %11110000  ; $0E plan 1
 
-; --- On saute jusqu'à la tuile $10 : 15 tuiles écrites × 16 octets = $F0 --------
-        .res $100 - $F0
+; --- $0F : le robot, le corps, 2e pose : jambes écartées (la course !) ----------
+        .byte %01111110         ; plan 0 : même buste que la tuile $09...
+        .byte %11100111
+        .byte %11111111
+        .byte %01111110
+        .byte %01000010         ; ...mais les jambes s'ouvrent
+        .byte %01000010
+        .byte %11000011
+        .byte %00000000
+        .byte %00000000         ; plan 1 : le voyant sur la poitrine
+        .byte %00011000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
 
 ; --- $10-$19 : les chiffres (la même fonte que le casse-brique) ------------------
         TUILE_UNIE %01111100, %11000110, %11001110, %11010110, %11100110, %11000110, %01111100, %00000000  ; 0
@@ -1627,6 +2081,35 @@ niveau:
         TUILE_UNIE %11111100, %11001100, %00001100, %00011000, %00110000, %00110000, %00110000, %00000000  ; 7
         TUILE_UNIE %01111000, %11001100, %11001100, %01111000, %11001100, %11001100, %01111000, %00000000  ; 8
         TUILE_UNIE %01111000, %11001100, %11001100, %01111100, %00001100, %00011000, %01110000, %00000000  ; 9
+
+; --- $1A : le drone, rotors phase 2 (l'hélice "a tourné") -----------------------
+        .byte %10011001         ; plan 0 : seule la 1re ligne change par
+        .byte %11111111         ; rapport à la tuile $0A — et à 15 images
+        .byte %01111110         ; par seconde, l'œil y croit !
+        .byte %01100110
+        .byte %01111110
+        .byte %00111100
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000         ; plan 1 : l'œil-caméra rouge
+        .byte %00000000
+        .byte %00000000
+        .byte %00011000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+
+; --- $1B : l'icône "puce" du bandeau (couleur 1 = or, dans la palette 2) --------
+        .byte %00000000
+        .byte %00011000
+        .byte %00111100
+        .byte %01111110
+        .byte %01111110
+        .byte %00111100
+        .byte %00011000
+        .byte %00000000
+        .res 8                  ; plan 1 vide
 
 ; Le reste des 8 Ko de graphismes est rempli de zéros par l'éditeur de liens.
 ; Fin du voyage — vous savez maintenant faire défiler un monde. 🤖
