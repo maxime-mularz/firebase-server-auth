@@ -132,6 +132,7 @@ TUILE_CAPS_LENTE = $0F   ; capsule "balle lente"
 TUILE_CHIFFRE_0  = $10   ; chiffres 0-9 : tuiles $10-$19
 TUILE_CAPS_VIE   = $1A   ; capsule "vie bonus" (le petit cœur)
 TIRET            = $1B
+TUILE_CAPS_MULTI = $1C   ; capsule "multiball" (deux billes)
 ; L'alphabet (partiel : uniquement les lettres de nos textes), tuiles $20+ :
 L_A = $20
 L_B = $21
@@ -146,6 +147,9 @@ L_R = $29
 L_S = $2A
 L_T = $2B
 L_U = $2C
+L_G = $2D
+L_M = $2E
+L_V = $2F
 ESPACE = $00
 
 ; --- Les types de briques dans la grille ---------------------------------------
@@ -159,6 +163,7 @@ TYPE_FISSUREE = 4   ; le 2e coup la détruit, 2 points
 CAPS_LARGE = 1      ; raquette de 32 pixels pendant ~10 secondes
 CAPS_LENTE = 2      ; la balle avance une image sur deux pendant ~10 s
 CAPS_VIE   = 3      ; +1 vie (9 maximum)
+CAPS_MULTI = 4      ; MULTIBALL : une seconde balle entre en scène !
 
 ; --- Les états du jeu ------------------------------------------------------------
 ETAT_ATTENTE = 0    ; la balle est collée à la raquette, on attend A
@@ -271,6 +276,21 @@ bas_pos:           .res 1
 bas_cpt:           .res 1
 bip_cpt:           .res 1
 bruit_cpt:         .res 1
+
+; v2.1 : le GAME OVER à l'écran et le MULTIBALL
+go_actif:          .res 1   ; 1 = la nmi doit écrire "GAME OVER"
+balle_perdue:      .res 1   ; compte rendu de deplacer_balle à maj_balles
+balle2_active:     .res 1   ; une seconde balle est en jeu !
+; La balle 2 : les MÊMES 8 octets que la balle 1, dans le MÊME ordre.
+; Ce n'est pas un hasard : voyez echanger_balles.
+balle2_x:          .res 1
+balle2_xs:         .res 1
+balle2_y:          .res 1
+balle2_ys:         .res 1
+balle2_dx_lo:      .res 1
+balle2_dx_hi:      .res 1
+balle2_dy_lo:      .res 1
+balle2_dy_hi:      .res 1
 
 
 ; -----------------------------------------------------------------------------
@@ -581,6 +601,8 @@ texte_record:
 texte_appuie:
         .byte L_A, L_P, L_P, L_U, L_I, L_E, ESPACE, L_S, L_U, L_R, ESPACE
         .byte L_S, L_T, L_A, L_R, L_T
+texte_gameover:
+        .byte L_G, L_A, L_M, L_E, ESPACE, L_O, L_V, L_E, L_R
 
 
 ; -----------------------------------------------------------------------------
@@ -629,6 +651,7 @@ demarrer_partie:
         sta capsule_type
         sta raquette_large
         sta balle_lente
+        sta balle2_active
         lda #3
         sta vies
         lda #1
@@ -821,6 +844,7 @@ principale:
         sta capsule_type
         sta raquette_large
         sta balle_lente
+        sta balle2_active
         jsr eteindre_ecran
         jsr charger_niveau
         jsr allumer_ecran
@@ -866,7 +890,7 @@ principale:
         jmp @dessiner
 
 @en_jeu:
-        jsr deplacer_balle
+        jsr maj_balles          ; la balle... ou LES balles (multiball !)
         jsr maj_capsule
         jsr maj_minuteries
 
@@ -1008,10 +1032,80 @@ deplacer_balle:
         lda balle_y
         cmp #BALLE_Y_PERDU
         bcc @pas_perdue
-        jmp perdre_vie
+        lda #1                  ; v2.1 : on ne perd plus la vie ICI. On lève
+        sta balle_perdue        ; juste un drapeau : c'est maj_balles qui
+        rts                     ; sait s'il reste une autre balle en jeu !
 @pas_perdue:
         jsr collision_briques
         jsr collision_raquette
+        rts
+
+
+; =============================================================================
+;  maj_balles — le MULTIBALL, ou : faire jouer 2 balles au même code
+; =============================================================================
+;  Le problème : tout notre moteur (deplacer_balle, collisions...) travaille
+;  sur LES variables balle_x, balle_dy... Écrire un double de chaque routine
+;  pour la balle 2 ? Plutôt mourir. L'astuce, vieille comme l'assembleur :
+;  on ÉCHANGE les 8 octets de la balle 2 avec ceux de la balle 1, on fait
+;  tourner le moteur (qui croit dur comme fer piloter la balle 1), et on
+;  ré-échange. Une seule physique, deux balles. Et la règle d'Arkanoid :
+;  on ne perd une vie que quand la DERNIÈRE balle tombe.
+
+maj_balles:
+        ; --- la balle 1 --------------------------------------------------------
+        lda #0
+        sta balle_perdue
+        jsr deplacer_balle
+        lda balle_perdue
+        beq @balle_2
+        ; la balle 1 est au fond... une remplaçante est-elle en jeu ?
+        lda balle2_active
+        bne @remplacer
+        jmp perdre_vie          ; non : la vie y passe (son rts conclura)
+@remplacer:
+        ldx #7                  ; oui ! la balle 2 DEVIENT la balle 1
+@promouvoir:
+        lda balle2_x, x
+        sta balle_x, x
+        dex
+        bpl @promouvoir
+        lda #0
+        sta balle2_active
+        rts
+
+@balle_2:
+        lda balle2_active
+        beq @fin
+        lda #0
+        sta balle_perdue
+        jsr echanger_balles     ; la balle 2 prend le costume de la 1...
+        jsr deplacer_balle      ; ...le moteur n'y voit que du feu...
+        jsr echanger_balles     ; ...et chacune reprend sa place
+        lda balle_perdue
+        beq @fin
+        lda #0                  ; la balle 2 est perdue — sans drame :
+        sta balle2_active       ; il en reste une !
+@fin:
+        rts
+
+; -----------------------------------------------------------------------------
+;  echanger_balles — troque les 8 octets de la balle 1 contre ceux de la 2.
+;  Possible UNIQUEMENT parce que les deux blocs de variables sont déclarés
+;  dans le même ordre : l'adressage "balle_x, x" parcourt les deux en
+;  parallèle. En assembleur, l'ordre de déclaration EST une structure.
+; -----------------------------------------------------------------------------
+echanger_balles:
+        ldx #7
+@boucle:
+        lda balle_x, x
+        tay
+        lda balle2_x, x
+        sta balle_x, x
+        tya
+        sta balle2_x, x
+        dex
+        bpl @boucle
         rts
 
 ; -----------------------------------------------------------------------------
@@ -1199,8 +1293,9 @@ incrementer_score:
 
 collision_raquette:
         lda balle_dy_hi
-        bmi @rate               ; la balle monte : rien à faire
-
+        bpl @descend            ; la balle monte : rien à faire (le @rate du
+        rts                     ; bas est trop loin pour un simple BMI !)
+@descend:
         lda balle_y             ; à hauteur de raquette ?
         cmp #RAQUETTE_Y - 8
         bcc @rate
@@ -1271,7 +1366,14 @@ collision_raquette:
         lda zones_dy_hi, y
         sbc #0
         sta balle_dy_hi
-        jsr bip_raquette
+        ; --- v2.1 : le son suit la zone ! grave au bord, aigu au centre — on
+        ;     ENTEND où l'on a frappé. Y contient toujours la zone : les
+        ;     tables de périodes ci-dessous font le reste.
+        lda sons_zone_haut, y
+        tax
+        lda sons_zone_bas, y
+        ldy #4
+        jsr jouer_bip
 @rate:
         rts
 
@@ -1281,6 +1383,9 @@ zones_dx_lo: .byte $00, $80, $80, $80, $00
 zones_dx_hi: .byte $FE, $FE, $00, $01, $02
 zones_dy_lo: .byte $00, $40, $C0, $40, $00
 zones_dy_hi: .byte $FF, $FE, $FD, $FE, $FF
+; ...et la note de chaque zone (sol4 grave aux bords, do5 clair au centre)
+sons_zone_bas:  .byte $1C, $FD, $D5, $FD, $1C
+sons_zone_haut: .byte $01, $00, $00, $00, $01
 
 
 ; =============================================================================
@@ -1299,10 +1404,10 @@ lacher_capsule:
         eor balle_x             ; notre "dé" : 2 bits qui valsent sans arrêt
         and #%00000011
         bne @fin                ; raté (3 chances sur 4)
-        lda capsule_suivante    ; à qui le tour ?
+        lda capsule_suivante    ; à qui le tour ? (4 bonus en rotation)
         clc
         adc #1
-        cmp #4
+        cmp #5
         bcc @type_ok
         lda #1
 @type_ok:
@@ -1360,7 +1465,31 @@ maj_capsule:
         beq @elargir
         cmp #CAPS_LENTE
         beq @ralentir
-        lda vies                ; CAPS_VIE : +1 vie, 9 au maximum
+        cmp #CAPS_VIE
+        beq @une_vie
+        ; --- CAPS_MULTI : la balle se dédouble ! -------------------------------
+        lda balle2_active
+        bne @consommer          ; déjà deux balles : merci quand même
+        ldx #7                  ; balle 2 = copie de la balle 1...
+@jumeler:
+        lda balle_x, x
+        sta balle2_x, x
+        dex
+        bpl @jumeler
+        lda balle2_dx_lo        ; ...mais en miroir : dx inversé, pour que
+        eor #$FF                ; les deux partent chacune de leur côté
+        clc
+        adc #1
+        sta balle2_dx_lo
+        lda balle2_dx_hi
+        eor #$FF
+        adc #0
+        sta balle2_dx_hi
+        lda #1
+        sta balle2_active
+        jmp @consommer
+@une_vie:
+        lda vies                ; +1 vie, 9 au maximum
         cmp #9
         bcs @consommer
         inc vies
@@ -1403,6 +1532,7 @@ perdre_vie:
         sta capsule_type
         sta raquette_large
         sta balle_lente
+        sta balle2_active
         dec vies
         beq @plus_de_vies
         lda #ETAT_ATTENTE
@@ -1413,6 +1543,8 @@ perdre_vie:
         sta etat
         lda #$F0                ; cache la balle sous l'écran
         sta balle_y
+        lda #1                  ; la nmi écrira "GAME OVER" au prochain VBlank
+        sta go_actif
         jsr maj_record
         jsr arreter_musique
         jmp bruit_fin
@@ -1636,6 +1768,7 @@ maj_sprites:
         sta $020C
         sta $0210
         sta $0214
+        sta $0218
         rts
 @en_jeu:
         ; --- Sprite 0 : la balle ------------------------------------------------
@@ -1709,13 +1842,30 @@ maj_sprites:
         sta $0216
         lda capsule_x
         sta $0217
-        rts
+        jmp @balle_2
 @cacher_capsule:
         lda #$F0
         sta $0214
+
+@balle_2:
+        ; --- Sprite 6 : la seconde balle du multiball -------------------------------
+        lda balle2_active
+        beq @cacher_balle_2
+        lda balle2_y
+        sta $0218
+        lda #TUILE_BALLE
+        sta $0219
+        lda #0
+        sta $021A
+        lda balle2_x
+        sta $021B
+        rts
+@cacher_balle_2:
+        lda #$F0
+        sta $0218
         rts
 
-tuiles_capsules: .byte 0, TUILE_CAPS_LARGE, TUILE_CAPS_LENTE, TUILE_CAPS_VIE
+tuiles_capsules: .byte 0, TUILE_CAPS_LARGE, TUILE_CAPS_LENTE, TUILE_CAPS_VIE, TUILE_CAPS_MULTI
 
 
 ; =============================================================================
@@ -1747,6 +1897,24 @@ nmi:
         lda #0
         sta effacer_actif
 @pas_de_brique:
+
+        lda go_actif            ; 2 bis) écrire "GAME OVER" ? (une seule fois,
+        beq @pas_de_game_over   ;        9 tuiles : très raisonnable en VBlank)
+        bit PPUSTATUS
+        lda #$21
+        sta PPUADDR
+        lda #$CB                ; $21CB = rangée 14, colonne 11
+        sta PPUADDR
+        ldx #0
+@ecrire_go:
+        lda texte_gameover, x
+        sta PPUDATA
+        inx
+        cpx #9
+        bne @ecrire_go
+        lda #0
+        sta go_actif
+@pas_de_game_over:
 
         ; 3) Le bandeau : score, niveau, vies
         bit PPUSTATUS
@@ -2064,8 +2232,26 @@ motif_forteresse:                       ; niveau 4 : la forteresse et ses
 ; --- $1B : le tiret ---------------------------------------------------------------------
         TUILE_BLANCHE %00000000, %00000000, %00000000, %01111110, %00000000, %00000000, %00000000, %00000000
 
-; --- on saute jusqu'à $20, où commence l'alphabet ($1C-$1F libres) ----------------------
-        .res 4 * 16
+; --- $1C : capsule MULTIBALL (pilule or, deux billes blanches) ---------------------------
+        .byte %00000000
+        .byte %00000000
+        .byte %01111110
+        .byte %11111111
+        .byte %11111111
+        .byte %01111110
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %01100110
+        .byte %01100110
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+
+; --- on saute jusqu'à $20, où commence l'alphabet ($1D-$1F libres) ----------------------
+        .res 3 * 16
 
 ; --- $20-$2C : les 13 lettres de nos textes (couleur 3) ---------------------------------
         TUILE_BLANCHE %00110000, %01111000, %11001100, %11001100, %11111100, %11001100, %11001100, %00000000  ; A
@@ -2081,6 +2267,9 @@ motif_forteresse:                       ; niveau 4 : la forteresse et ses
         TUILE_BLANCHE %01111000, %11001100, %11100000, %01110000, %00011100, %11001100, %01111000, %00000000  ; S
         TUILE_BLANCHE %11111100, %10110100, %00110000, %00110000, %00110000, %00110000, %01111000, %00000000  ; T
         TUILE_BLANCHE %11001100, %11001100, %11001100, %11001100, %11001100, %11001100, %01111100, %00000000  ; U
+        TUILE_BLANCHE %00111100, %01100110, %11000000, %11001110, %11000110, %01100110, %00111110, %00000000  ; G
+        TUILE_BLANCHE %11000110, %11101110, %11111110, %11010110, %11000110, %11000110, %11000110, %00000000  ; M
+        TUILE_BLANCHE %11001100, %11001100, %11001100, %11001100, %11001100, %01111000, %00110000, %00000000  ; V
 
 ; Le reste des 8 Ko de CHR-ROM est rempli de zéros par l'éditeur de liens.
 ; Fin du fichier — et cette fois, vous avez un jeu d'arcade complet !
