@@ -1,9 +1,21 @@
 ; =============================================================================
-;  CASSE-BRIQUE NES — l'assembleur 6502 pour les nuls
+;  CASSE-BRIQUE NES v2 — l'assembleur 6502 pour les nuls
 ; =============================================================================
 ;
 ;  Un jeu de casse-brique complet pour la Nintendo NES, écrit en assembleur
 ;  6502, et commenté ligne par ligne dans un but pédagogique.
+;
+;  NOUVEAUTÉS DE LA VERSION 2 :
+;   - des rebonds à 5 angles selon la zone de la raquette touchée, grâce à
+;     des vitesses en VIRGULE FIXE 8.8 (fini les diagonales à 45° !) ;
+;   - des CAPSULES BONUS qui tombent des briques : raquette élargie,
+;     balle ralentie, vie supplémentaire ;
+;   - trois familles de BRIQUES : normales, solides (2 coups, elles se
+;     fissurent), dorées (5 points) — colorées par la table d'attributs ;
+;   - des NIVEAUX successifs à motifs dessinés dans la ROM, avec une
+;     balle de plus en plus rapide ;
+;   - un ÉCRAN TITRE avec du texte (un alphabet dans la CHR-ROM !) et le
+;     RECORD de la session, qui survit d'une partie à l'autre.
 ;
 ;  COMMENT LIRE CE FICHIER ?
 ;  -------------------------
@@ -27,7 +39,7 @@
 ;    CMP #8         compare A avec 8 (positionne des "drapeaux")
 ;    BEQ la_bas     saute à l'étiquette si égal         (Branch if EQual)
 ;    BNE la_bas     saute si différent                  (Branch if Not Equal)
-;    BCC / BCS      saute si inférieur / supérieur-ou-égal (comparaison non signée)
+;    BCC / BCS      saute si inférieur / supérieur-ou-égal (non signé)
 ;    JMP la_bas     saut inconditionnel (un "goto")
 ;    JSR routine    appelle un sous-programme           (Jump to SubRoutine)
 ;    RTS            revient du sous-programme           (ReTurn from Subroutine)
@@ -45,37 +57,20 @@
 ;  Les étiquettes qui commencent par @ sont des étiquettes "locales" à la
 ;  routine en cours : on peut réutiliser le même nom ailleurs sans conflit.
 ;
-; =============================================================================
 ;  L'ARCHITECTURE DE LA NES EN BREF
-; =============================================================================
-;
-;  La NES contient DEUX puces qui travaillent en parallèle :
-;    - le CPU (6502) : exécute ce fichier ;
-;    - le PPU (Picture Processing Unit) : dessine l'image, 60 fois/seconde.
-;
-;  Le CPU ne peut PAS écrire directement des pixels. Il parle au PPU à
-;  travers quelques "registres" projetés en mémoire (adresses $2000-$2007).
-;  Et il ne peut le faire sans casser l'image QUE pendant le "VBlank" :
-;  le court instant où le canon à électrons de la télé remonte en haut de
-;  l'écran. Le PPU nous prévient du VBlank en déclenchant une interruption
-;  appelée NMI — notre routine `nmi` tout en bas est alors exécutée.
-;
-;  L'image est composée de :
-;    - un FOND (background) : une grille de 32×30 tuiles de 8×8 pixels,
-;      décrite dans la "nametable" (adresse PPU $2000). Nos BRIQUES et nos
-;      MURS sont des tuiles de fond.
-;    - des SPRITES : 64 petits objets de 8×8 pixels librement positionnables.
-;      Notre BALLE (1 sprite) et notre RAQUETTE (3 sprites) en font partie.
-;
+;  --------------------------------
+;  Deux puces travaillent en parallèle : le CPU (6502) exécute ce fichier,
+;  le PPU dessine l'image 60 fois par seconde. Le CPU ne touche à la mémoire
+;  vidéo QUE pendant le VBlank, signalé par l'interruption NMI. Le fond est
+;  une grille de 32×30 tuiles (nos murs et nos briques), les sprites sont
+;  des objets mobiles de 8×8 (balle, raquette, capsules). La règle d'or :
+;  la boucle principale CALCULE, la routine nmi AFFICHE.
 ; =============================================================================
 
 
 ; -----------------------------------------------------------------------------
 ;  CONSTANTES : les registres matériels de la NES
 ; -----------------------------------------------------------------------------
-;  Une constante n'occupe aucune mémoire : l'assembleur remplace simplement
-;  le nom par sa valeur. C'est juste pour rendre le code lisible.
-
 PPUCTRL   = $2000   ; configuration du PPU (active la NMI, etc.)
 PPUMASK   = $2001   ; active/désactive l'affichage du fond et des sprites
 PPUSTATUS = $2002   ; état du PPU (le bit 7 passe à 1 pendant le VBlank)
@@ -89,29 +84,22 @@ JOYPAD1   = $4016   ; lecture de la manette 1
 APUFRAME  = $4017   ; horloge de l'APU
 
 ; --- Les registres du son : l'APU (Audio Processing Unit) --------------------
-;  La NES possède une troisième puce (en fait logée dans le CPU) : l'APU,
-;  avec 5 voix. Nous en utilisons 4 :
-;    - CARRE 1 : une onde carrée → nos BRUITAGES (bips de rebond) ;
-;    - CARRE 2 : une autre onde carrée → la MÉLODIE de la musique ;
-;    - TRIANGLE : une onde douce, plus grave → la BASSE de la musique ;
-;    - BRUIT : un souffle aléatoire → percussions et explosions.
-;  Comme pour le PPU, on pilote tout par des registres. Pour chaque canal :
-;  un registre de volume/timbre, et la "période" sur 2 registres (bas+haut).
-;  ATTENTION, c'est contre-intuitif : la période est l'INVERSE de la
-;  hauteur. Grande période = note grave, petite période = note aiguë.
-CARRE1_VOL  = $4000 ; timbre + volume du carré 1
-CARRE1_BAL  = $4001 ; "balayage" automatique de fréquence (on le neutralise)
-CARRE1_BAS  = $4002 ; période, octet bas
-CARRE1_HAUT = $4003 ; période, 3 bits hauts (+ compteur de durée matériel)
+;  4 voix : carré 1 = bruitages, carré 2 = mélodie, triangle = basse,
+;  bruit = chocs. Rappel contre-intuitif : la hauteur d'une note se règle
+;  par sa PÉRIODE — grande période = note grave.
+CARRE1_VOL  = $4000
+CARRE1_BAL  = $4001
+CARRE1_BAS  = $4002
+CARRE1_HAUT = $4003
 CARRE2_VOL  = $4004
 CARRE2_BAL  = $4005
 CARRE2_BAS  = $4006
 CARRE2_HAUT = $4007
-TRI_LIN     = $4008 ; compteur linéaire du triangle (sa "pédale" marche/arrêt)
+TRI_LIN     = $4008
 TRI_BAS     = $400A
 TRI_HAUT    = $400B
 BRUIT_VOL   = $400C
-BRUIT_PER   = $400E ; période du bruit : 0 = "tsss" aigu ... 15 = grondement
+BRUIT_PER   = $400E
 BRUIT_LON   = $400F
 
 ; --- Les boutons de la manette, tels qu'on les reçoit dans `boutons` ---------
@@ -125,27 +113,62 @@ BTN_GAUCHE = %00000010
 BTN_DROITE = %00000001
 
 ; --- Les numéros de nos tuiles (dessinées tout en bas, section CHR) ----------
-TUILE_VIDE      = $00
-TUILE_BRIQUE_G  = $01   ; moitié gauche d'une brique
-TUILE_BRIQUE_D  = $02   ; moitié droite d'une brique
-TUILE_MUR       = $03
-TUILE_BALLE     = $04
-TUILE_RAQ_G     = $05   ; bout gauche de la raquette
-TUILE_RAQ_M     = $06   ; milieu de la raquette
-TUILE_RAQ_D     = $07   ; bout droit de la raquette
-TUILE_CHIFFRE_0 = $10   ; les chiffres 0-9 occupent les tuiles $10 à $19
+TUILE_VIDE       = $00
+TUILE_NORMALE_G  = $01   ; brique orange, 1 coup
+TUILE_NORMALE_D  = $02
+TUILE_MUR        = $03
+TUILE_BALLE      = $04
+TUILE_RAQ_G      = $05
+TUILE_RAQ_M      = $06
+TUILE_RAQ_D      = $07
+TUILE_SOLIDE_G   = $08   ; brique grise, 2 coups
+TUILE_SOLIDE_D   = $09
+TUILE_FISSURE_G  = $0A   ; brique solide déjà touchée une fois
+TUILE_FISSURE_D  = $0B
+TUILE_DOREE_G    = $0C   ; brique dorée, 5 points
+TUILE_DOREE_D    = $0D
+TUILE_CAPS_LARGE = $0E   ; capsule "raquette élargie"
+TUILE_CAPS_LENTE = $0F   ; capsule "balle lente"
+TUILE_CHIFFRE_0  = $10   ; chiffres 0-9 : tuiles $10-$19
+TUILE_CAPS_VIE   = $1A   ; capsule "vie bonus" (le petit cœur)
+TIRET            = $1B
+; L'alphabet (partiel : uniquement les lettres de nos textes), tuiles $20+ :
+L_A = $20
+L_B = $21
+L_C = $22
+L_D = $23
+L_E = $24
+L_I = $25
+L_O = $26
+L_P = $27
+L_Q = $28
+L_R = $29
+L_S = $2A
+L_T = $2B
+L_U = $2C
+ESPACE = $00
 
-; --- Les états du jeu ---------------------------------------------------------
+; --- Les types de briques dans la grille ---------------------------------------
+;  0 = pas de brique, et sinon :
+TYPE_NORMALE  = 1   ; orange, 1 coup, 1 point
+TYPE_SOLIDE   = 2   ; grise, 1er coup → devient FISSUREE
+TYPE_DOREE    = 3   ; dorée, 1 coup, 5 points
+TYPE_FISSUREE = 4   ; le 2e coup la détruit, 2 points
+
+; --- Les capsules bonus ---------------------------------------------------------
+CAPS_LARGE = 1      ; raquette de 32 pixels pendant ~10 secondes
+CAPS_LENTE = 2      ; la balle avance une image sur deux pendant ~10 s
+CAPS_VIE   = 3      ; +1 vie (9 maximum)
+
+; --- Les états du jeu ------------------------------------------------------------
 ETAT_ATTENTE = 0    ; la balle est collée à la raquette, on attend A
 ETAT_JEU     = 1    ; la balle est en mouvement
-ETAT_FINI    = 2    ; victoire ou défaite, on attend Start
+ETAT_FINI    = 2    ; défaite : on attend Start pour revenir au titre
+ETAT_TITRE   = 3    ; l'écran titre
+ETAT_PAUSE   = 4    ; petit entracte entre deux niveaux
 
-; --- Les notes de musique ------------------------------------------------------
-;  Chaque note est un simple numéro, qui servira d'index dans les tables
-;  notes_bas / notes_haut (près du moteur de musique, plus bas). Ces tables
-;  contiennent la PÉRIODE de chaque note : période = 1 789 773 ÷ (16 × Hz) − 1
-;  (1 789 773 Hz étant la cadence du CPU). Le la du diapason (440 Hz) donne
-;  ainsi 253. Oui : votre console fait de la physique des ondes.
+; --- Les notes de musique ----------------------------------------------------------
+;  période = 1 789 773 ÷ (16 × Hz) − 1 (1 789 773 Hz = la cadence du CPU).
 NOTE_SILENCE = 0
 NOTE_FA2  = 1
 NOTE_SOL2 = 2
@@ -162,106 +185,113 @@ NOTE_FA5  = 12
 NOTE_SOL5 = 13
 NOTE_LA5  = 14
 
-; --- Géométrie du terrain (en pixels) -----------------------------------------
-;  L'écran fait 256×240 pixels. Le mur du haut occupe la rangée de tuiles 3
-;  (pixels 24-31), les murs latéraux les colonnes 0 et 31.
-RAQUETTE_Y   = 208  ; ligne verticale (fixe) de la raquette
-BALLE_X_MIN  = 8    ; contre le mur de gauche
-BALLE_X_MAX  = 240  ; contre le mur de droite (la balle fait 8 px de large)
-BALLE_Y_MIN  = 32   ; contre le mur du haut
-BALLE_Y_PERDU = 232 ; en dessous, la balle est perdue !
+; --- Géométrie du terrain (en pixels) ------------------------------------------------
+RAQUETTE_Y    = 208
+BALLE_X_MIN   = 8
+BALLE_X_MAX   = 240
+BALLE_Y_MIN   = 32
+BALLE_Y_PERDU = 232
 
 
 ; -----------------------------------------------------------------------------
-;  VARIABLES en "page zéro"
+;  VARIABLES en page zéro
 ; -----------------------------------------------------------------------------
-;  La page zéro, ce sont les adresses $0000-$00FF : les 256 premiers octets
-;  de la RAM. Le 6502 y accède plus vite qu'au reste de la mémoire, on y met
-;  donc les variables utilisées tout le temps.
-;  `.res 1` veut dire : "réserve 1 octet ici". Un octet = un nombre de 0 à 255.
-
 .zeropage
 
-boutons:           .res 1   ; état des 8 boutons de la manette (1 bit chacun)
+boutons:           .res 1
+anciens:           .res 1   ; boutons de l'image précédente...
+presses:           .res 1   ; ...pour détecter ceux qui VIENNENT d'être pressés
 image:             .res 1   ; compteur d'images, +1 à chaque VBlank (60/s)
-etat:              .res 1   ; ETAT_ATTENTE, ETAT_JEU ou ETAT_FINI
+etat:              .res 1
 
-balle_x:           .res 1   ; position de la balle (coin haut-gauche)
+; LA BALLE, EN VIRGULE FIXE 8.8. Chaque coordonnée a désormais deux octets :
+; les pixels entiers (balle_x) et les 256e de pixel (balle_xs). La vitesse
+; aussi : $0180 = 1,5 pixel/image, $FE80 = −1,5 (complément à deux). C'est ce
+; qui permet des angles fins — le secret des trajectoires d'Arkanoid !
+balle_x:           .res 1
+balle_xs:          .res 1   ; sous-pixels de x
 balle_y:           .res 1
-balle_dx:          .res 1   ; vitesse horizontale : +2 ou -2 ($FE)
-balle_dy:          .res 1   ; vitesse verticale   : +2 ou -2 ($FE)
-                            ; NB : -2 s'écrit $FE car sur un octet, les
-                            ; nombres négatifs "bouclent" (256-2 = 254 = $FE).
-                            ; C'est le "complément à deux".
+balle_ys:          .res 1
+balle_dx_lo:       .res 1   ; vitesse horizontale (16 bits signés)
+balle_dx_hi:       .res 1
+balle_dy_lo:       .res 1   ; vitesse verticale
+balle_dy_hi:       .res 1
 
-raquette_x:        .res 1   ; bord gauche de la raquette (24 px de large)
+raquette_x:        .res 1
 
 vies:              .res 1
-score_u:           .res 1   ; score, chiffre des unités  (0-9)
-score_d:           .res 1   ; ... des dizaines
-score_c:           .res 1   ; ... des centaines
-briques_restantes: .res 1   ; quand il atteint 0 → gagné !
+niveau:            .res 1
+score_u:           .res 1   ; score : un chiffre par octet, comme à l'école
+score_d:           .res 1
+score_c:           .res 1
+record_u:          .res 1   ; le RECORD de la session. Il n'est remis à zéro
+record_d:          .res 1   ; qu'à l'allumage de la console : les parties se
+record_c:          .res 1   ; succèdent, lui reste. (Voir la fin de perdre_vie.)
+briques_restantes: .res 1
 
-; File d'attente pour effacer une brique à l'écran : le jeu (hors VBlank) ne
-; peut pas toucher à la mémoire vidéo, alors il note ici l'adresse de la
-; brique cassée, et la routine `nmi` fera l'effacement au prochain VBlank.
-effacer_actif:     .res 1   ; 1 = il y a une brique à effacer
-effacer_hi:        .res 1   ; adresse vidéo de la brique (octet haut)
-effacer_lo:        .res 1   ; ... (octet bas)
+; File d'attente pour la nmi : redessiner UNE brique (2 tuiles) à l'écran.
+; v2 : on n'écrit plus forcément du vide — une brique solide touchée est
+; REDESSINÉE en brique fissurée. La file transporte donc aussi les tuiles.
+effacer_actif:     .res 1
+effacer_hi:        .res 1
+effacer_lo:        .res 1
+effacer_tg:        .res 1   ; tuile gauche à écrire
+effacer_td:        .res 1   ; tuile droite
 
-; Petites variables de travail pour les calculs de collision
-col_tuile:         .res 1   ; colonne de tuile (0-31) où se trouve la balle
-lig_tuile:         .res 1   ; rangée de tuile (0-29)
-col_brique:        .res 1   ; colonne dans la grille de briques (0-14)
-lig_brique:        .res 1   ; rangée dans la grille de briques (0-5)
+; La capsule bonus (une seule à la fois, c'est bien assez)
+capsule_type:      .res 1   ; 0 = aucune, sinon CAPS_...
+capsule_x:         .res 1
+capsule_y:         .res 1
+capsule_suivante:  .res 1   ; pour distribuer les bonus à tour de rôle
 
-; Adresses de travail pour dessiner le décor
+; Les minuteries des bonus (décomptées toutes les 4 images : 150 ≈ 10 s)
+raquette_large:    .res 1
+balle_lente:       .res 1
+
+pause_cpt:         .res 1   ; l'entracte entre deux niveaux
+vitesse_extra:     .res 1   ; supplément de vitesse par niveau (en 256e)
+
+; Variables de travail pour les collisions et le dessin
+col_tuile:         .res 1
+lig_tuile:         .res 1
+col_brique:        .res 1
+lig_brique:        .res 1
 adr_lo:            .res 1
 adr_hi:            .res 1
 tmp_lo:            .res 1
 tmp_hi:            .res 1
+tmp2:              .res 1
+motif_ptr:         .res 2   ; pointeur vers le motif de briques du niveau
 
-; Le moteur de musique : où en est-on dans la partition ?
-mus_active:        .res 1   ; 1 = la musique joue
-mel_pos:           .res 1   ; position dans la table `melodie`
-mel_cpt:           .res 1   ; images restantes avant la prochaine note
-bas_pos:           .res 1   ; position dans la table `basse`
+; Le moteur de musique et les bruitages
+mus_active:        .res 1
+mel_pos:           .res 1
+mel_cpt:           .res 1
+bas_pos:           .res 1
 bas_cpt:           .res 1
-; Les bruitages : combien d'images avant de couper le son ?
-bip_cpt:           .res 1   ; pour le canal carré 1
-bruit_cpt:         .res 1   ; pour le canal de bruit
+bip_cpt:           .res 1
+bruit_cpt:         .res 1
 
 
 ; -----------------------------------------------------------------------------
 ;  VARIABLES en RAM ordinaire
 ; -----------------------------------------------------------------------------
-;  La grille logique des briques : 6 rangées de 15 briques. On réserve 16
-;  cases par rangée (au lieu de 15) car multiplier par 16 est très facile en
-;  assembleur (4 décalages à gauche), alors que multiplier par 15 est pénible.
-;  1 = brique présente, 0 = brique cassée.
-;
-;  NB : la mémoire $0200-$02FF est réservée à notre "brouillon" de sprites
-;  (voir maj_sprites), c'est pourquoi cette grille est placée à partir de $0300
-;  (voir le fichier nes.cfg).
-
 .bss
 
-grille: .res 96   ; 6 rangées × 16 colonnes
+grille: .res 96   ; 6 rangées × 16 colonnes (15 briques + 1 case de bourrage)
+                  ; chaque case contient un TYPE_... ou 0
 
 
 ; =============================================================================
 ;  L'EN-TÊTE iNES
 ; =============================================================================
-;  Les 16 premiers octets du fichier .nes ne sont pas lus par la console :
-;  ils décrivent la cartouche à l'émulateur (taille de la ROM, etc.).
-
 .segment "HEADER"
-        .byte 'N', 'E', 'S', $1A   ; signature obligatoire
+        .byte 'N', 'E', 'S', $1A
         .byte 2                    ; 2 blocs de 16 Ko de code (PRG-ROM)
         .byte 1                    ; 1 bloc de 8 Ko de graphismes (CHR-ROM)
-        .byte $01                  ; miroir vertical (sans importance ici)
+        .byte $01
         .byte $00
-        .byte 0,0,0,0,0,0,0,0      ; le reste est inutilisé
+        .byte 0,0,0,0,0,0,0,0
 
 
 ; =============================================================================
@@ -272,36 +302,29 @@ grille: .res 96   ; 6 rangées × 16 colonnes
 ; -----------------------------------------------------------------------------
 ;  RESET : le point de départ
 ; -----------------------------------------------------------------------------
-;  À l'allumage (ou au redémarrage), la console saute ici (grâce au "vecteur"
-;  déclaré tout en bas du fichier). On doit d'abord initialiser le matériel :
-;  c'est un rituel quasi identique dans tous les jeux NES.
+;  Le rituel d'initialisation, identique à la v1. Une nuance IMPORTANTE en
+;  v2 : on ne repasse plus JAMAIS par ici entre deux parties (sinon le
+;  record serait effacé !). Reset = allumer la console ; commencer une
+;  partie = demarrer_partie. Deux choses différentes.
 
 reset:
-        sei                     ; ignore les interruptions pendant l'init
-        cld                     ; désactive le mode décimal (inexistant sur NES)
+        sei
+        cld
         ldx #$40
-        stx APUFRAME            ; coupe les interruptions de l'horloge son
+        stx APUFRAME
         ldx #$FF
-        txs                     ; initialise le pointeur de pile à $01FF
-        inx                     ; X passe de $FF à $00 (il "boucle")
-        stx PPUCTRL             ; NMI désactivée pour l'instant
-        stx PPUMASK             ; affichage coupé
-        stx $4010               ; canal sonore DMC coupé
-
-        ; Le PPU met ~2 images à démarrer. On attend deux VBlank complets.
-        ; BIT lit PPUSTATUS : le bit 7 (le signe) indique le VBlank.
-        ; BPL = "Branch if PLus" = saute tant que le bit 7 vaut 0.
-        bit PPUSTATUS           ; première lecture pour partir d'un état connu
+        txs
+        inx
+        stx PPUCTRL
+        stx PPUMASK
+        stx $4010
+        bit PPUSTATUS
 @attente_vblank_1:
         bit PPUSTATUS
         bpl @attente_vblank_1
-
-        ; Pendant l'attente du 2e VBlank, on met toute la RAM à zéro.
-        ; La zone $0200-$02FF (le brouillon des sprites) est remplie de $FF :
-        ; un sprite dont le Y vaut $FF est hors écran, donc invisible.
         lda #0
 @vider_ram:
-        sta $0000, x            ; "adresse + X" : X sert d'index, de 0 à 255
+        sta $0000, x
         sta $0100, x
         sta $0300, x
         sta $0400, x
@@ -312,144 +335,111 @@ reset:
         sta $0200, x            ; sprites hors écran
         lda #0
         inx
-        bne @vider_ram          ; X reboucle à 0 après 255 → fin de la boucle
-
+        bne @vider_ram
 @attente_vblank_2:
         bit PPUSTATUS
         bpl @attente_vblank_2
 
-        ; Le PPU est prêt. L'affichage est encore coupé : on peut remplir
-        ; tranquillement la mémoire vidéo.
         jsr charger_palettes
-        jsr dessiner_decor
-        jsr preparer_partie
+        jsr dessiner_cadre      ; le décor permanent : murs + attributs
+        jsr dessiner_ecran_titre
+        lda #ETAT_TITRE
+        sta etat
+        lda #3
+        sta vies                ; juste pour l'affichage du bandeau au titre
 
-        ; On ouvre les 4 robinets du son (1 bit par canal)...
-        lda #%00001111          ; bruit + triangle + carré 2 + carré 1
+        lda #%00001111          ; on ouvre les 4 robinets du son...
         sta APUSTATUS
         jsr demarrer_musique    ; ...et en musique !
 
-        ; Remet le défilement de l'écran à (0,0) — écrire dans PPUADDR l'a
-        ; déréglé — puis allume tout.
-        bit PPUSTATUS           ; réarme la bascule interne du PPU
-        lda #0
-        sta PPUSCROLL           ; défilement horizontal = 0
-        sta PPUSCROLL           ; défilement vertical = 0
-        lda #%10000000          ; bit 7 : déclenche la NMI à chaque VBlank
-        sta PPUCTRL
-        lda #%00011110          ; montre le fond + les sprites, partout
-        sta PPUMASK
+        jsr allumer_ecran
         jmp principale
 
 
 ; -----------------------------------------------------------------------------
-;  preparer_partie : valeurs de départ d'une nouvelle partie
+;  eteindre_ecran / allumer_ecran
 ; -----------------------------------------------------------------------------
-preparer_partie:
-        lda #3
-        sta vies
+;  v2 redessine l'écran en cours de route (nouveau niveau, retour au titre).
+;  La règle : on coupe TOUT (affichage et NMI), on redessine tranquillement,
+;  on attend un VBlank, et on rallume. L'écran devient noir un instant —
+;  toutes les consoles 8 bits font ça, regardez bien les vieux jeux !
+
+eteindre_ecran:
         lda #0
-        sta score_u
-        sta score_d
-        sta score_c
-        sta effacer_actif
-        sta image
-        lda #ETAT_ATTENTE
-        sta etat
-        lda #116                ; raquette au centre : (256-24)/2 ≈ 116
-        sta raquette_x
-        lda #90                 ; 6 rangées × 15 briques
-        sta briques_restantes
+        sta PPUCTRL             ; NMI coupée
+        sta PPUMASK             ; affichage coupé
+        rts
 
-        ; Remplit la grille logique : d'abord tout à 1...
-        ldx #95
-        lda #1
-@remplir:
-        sta grille, x
-        dex
-        bpl @remplir            ; BPL : boucle tant que X ≥ 0
-
-        ; ...puis on remet à 0 la 16e colonne de chaque rangée (les cases
-        ; 15, 31, 47... qui n'existent que pour faciliter les calculs).
-        ldx #15
-@vider_colonne_fantome:
-        lda #0                  ; attention : recharger 0 à CHAQUE tour, car
-        sta grille, x           ; le TXA ci-dessous écrase A !
-        txa                     ; transfère X dans A pour pouvoir additionner
-        clc                     ; toujours mettre la retenue à 0 avant ADC !
-        adc #16
-        tax                     ; et on remet le résultat dans X
-        cpx #96
-        bcc @vider_colonne_fantome
+allumer_ecran:
+        bit PPUSTATUS
+@attendre:
+        bit PPUSTATUS
+        bpl @attendre
+        lda #0
+        sta PPUSCROLL           ; remet le défilement à (0,0) : nos écritures
+        sta PPUSCROLL           ; via PPUADDR l'ont déréglé
+        lda #%10000000
+        sta PPUCTRL
+        lda #%00011110
+        sta PPUMASK
         rts
 
 
 ; -----------------------------------------------------------------------------
 ;  charger_palettes : les couleurs
 ; -----------------------------------------------------------------------------
-;  La NES ne connaît que 64 couleurs prédéfinies (numérotées $00-$3F).
-;  On en choisit quelques-unes et on les range dans la mémoire des palettes
-;  du PPU, à l'adresse vidéo $3F00.
-;
-;  Pour écrire en mémoire vidéo : on donne l'adresse en 2 fois dans PPUADDR
-;  (octet haut puis octet bas), puis chaque écriture dans PPUDATA écrit un
-;  octet ET avance automatiquement à l'adresse suivante.
-
 charger_palettes:
-        bit PPUSTATUS           ; réarme la bascule haut/bas de PPUADDR
+        bit PPUSTATUS
         lda #$3F
         sta PPUADDR
         lda #$00
-        sta PPUADDR             ; adresse vidéo = $3F00
+        sta PPUADDR
         ldx #0
 @copier:
-        lda palettes, x         ; lit la table `palettes` (plus bas) + X
+        lda palettes, x
         sta PPUDATA
         inx
-        cpx #32                 ; 32 octets : 4 palettes de fond + 4 de sprites
+        cpx #32
         bne @copier
         rts
 
 palettes:
-        ; --- 4 palettes de FOND (chacune : fond, couleur 1, 2, 3) ---
-        .byte $0F, $27, $10, $30   ; noir, orange (briques), gris (murs), blanc (chiffres)
-        .byte $0F, $0F, $0F, $0F   ; inutilisée
-        .byte $0F, $0F, $0F, $0F   ; inutilisée
-        .byte $0F, $0F, $0F, $0F   ; inutilisée
+        ; --- 4 palettes de FOND ---
+        ;  La palette 0 sert au bandeau et aux murs, la palette 1 à la zone
+        ;  des briques (choisie par la table d'attributs, voir
+        ;  dessiner_cadre) : c'est elle qui rend les briques dorées... dorées.
+        .byte $0F, $27, $10, $30   ; 0 : orange, gris, blanc (chiffres/texte)
+        .byte $0F, $27, $10, $28   ; 1 : orange, gris (solides), OR (dorées)
+        .byte $0F, $0F, $0F, $0F
+        .byte $0F, $0F, $0F, $0F
         ; --- 4 palettes de SPRITES ---
-        .byte $0F, $30, $00, $0F   ; palette 0 : balle blanche
-        .byte $0F, $00, $21, $0F   ; palette 1 : raquette bleue
-        .byte $0F, $0F, $0F, $0F   ; inutilisée
-        .byte $0F, $0F, $0F, $0F   ; inutilisée
+        .byte $0F, $30, $00, $0F   ; 0 : balle blanche
+        .byte $0F, $00, $21, $0F   ; 1 : raquette bleue
+        .byte $0F, $28, $16, $30   ; 2 : capsules (or, rouge, blanc)
+        .byte $0F, $0F, $0F, $0F
 
 
-; -----------------------------------------------------------------------------
-;  dessiner_decor : remplit la nametable (murs + briques)
-; -----------------------------------------------------------------------------
-;  La nametable ($2000-$23BF en mémoire vidéo) est la grille de 32×30 numéros
-;  de tuiles qui compose le fond. L'adresse d'une tuile se calcule ainsi :
-;      adresse = $2000 + rangée × 32 + colonne
-
-dessiner_decor:
-        ; --- 1) Tout vider : 960 tuiles + 64 octets d'attributs = 1024 octets
+; =============================================================================
+;  LE DÉCOR PERMANENT : cadre, murs, attributs (dessiné une fois, au reset)
+; =============================================================================
+dessiner_cadre:
+        ; --- 1) Tout vider : 960 tuiles + 64 octets d'attributs -------------
         bit PPUSTATUS
         lda #$20
         sta PPUADDR
         lda #$00
-        sta PPUADDR             ; adresse vidéo = $2000
-        ldx #4                  ; 4 paquets...
-        ldy #0                  ; ...de 256 octets = 1024
+        sta PPUADDR
+        ldx #4
+        ldy #0
         lda #TUILE_VIDE
 @vider:
         sta PPUDATA
         iny
-        bne @vider              ; boucle intérieure : 256 tours
+        bne @vider
         dex
-        bne @vider              ; boucle extérieure : 4 tours
-        ; (les 64 derniers octets sont la "table d'attributs" : des zéros
-        ;  signifient "tout le fond utilise la palette 0" — parfait pour nous)
+        bne @vider
 
-        ; --- 2) Le mur du haut : 32 tuiles sur la rangée 3 ($2060) ---
+        ; --- 2) Le mur du haut : 32 tuiles sur la rangée 3 ($2060) ----------
         bit PPUSTATUS
         lda #$20
         sta PPUADDR
@@ -462,15 +452,12 @@ dessiner_decor:
         dex
         bne @mur_haut
 
-        ; --- 3) Les murs latéraux : colonnes 0 et 31, rangées 4 à 29 ---
-        ;  Les adresses dépassent 255, il faut donc calculer sur 16 bits...
-        ;  avec un processeur 8 bits ! Recette : on traite l'octet bas puis
-        ;  l'octet haut, en propageant la retenue (le carry) entre les deux.
+        ; --- 3) Les murs latéraux : colonnes 0 et 31, rangées 4 à 29 --------
         lda #$20
         sta adr_hi
-        lda #$80                ; $2080 = rangée 4, colonne 0
+        lda #$80
         sta adr_lo
-        ldx #26                 ; 26 rangées (de la 4 à la 29)
+        ldx #26
 @murs_lateraux:
         bit PPUSTATUS
         lda adr_hi
@@ -478,23 +465,21 @@ dessiner_decor:
         lda adr_lo
         sta PPUADDR
         lda #TUILE_MUR
-        sta PPUDATA             ; tuile de la colonne 0
-
-        lda adr_lo              ; adresse de la colonne 31 = adresse + 31
+        sta PPUDATA
+        lda adr_lo
         clc
         adc #31
         sta tmp_lo
         lda adr_hi
-        adc #0                  ; ajoute juste la retenue éventuelle
+        adc #0
         sta tmp_hi
         lda tmp_hi
         sta PPUADDR
         lda tmp_lo
         sta PPUADDR
         lda #TUILE_MUR
-        sta PPUDATA             ; tuile de la colonne 31
-
-        lda adr_lo              ; rangée suivante : adresse += 32
+        sta PPUDATA
+        lda adr_lo
         clc
         adc #32
         sta adr_lo
@@ -504,157 +489,439 @@ dessiner_decor:
         dex
         bne @murs_lateraux
 
-        ; --- 4) Les briques : 6 rangées de 15 briques de 2 tuiles ---
-        ldy #0                  ; Y = numéro de rangée de briques (0-5)
-@rangee_briques:
+        ; --- 4) LES ATTRIBUTS : la palette 1 pour la zone des briques -------
+        ;  Chaque octet de la table d'attributs ($23C0-$23FF) choisit la
+        ;  palette d'un carré de 4×4 tuiles. Les rangées d'attributs 1 et 2
+        ;  couvrent les tuiles 4 à 11 — pile la zone des briques. En y
+        ;  écrivant %01010101 ("palette 1 partout"), les briques dorées
+        ;  deviennent OR sans toucher au blanc des chiffres du bandeau.
         bit PPUSTATUS
-        lda lignes_briques_hi, y
+        lda #$23
         sta PPUADDR
-        lda lignes_briques_lo, y
-        clc
-        adc #1                  ; +1 : on commence à la colonne 1 (après le mur)
+        lda #$C8                ; $23C8 = début de la rangée d'attributs 1
         sta PPUADDR
-        ldx #15                 ; 15 briques par rangée
-@une_brique:
-        lda #TUILE_BRIQUE_G
-        sta PPUDATA
-        lda #TUILE_BRIQUE_D
+        lda #%01010101
+        ldx #16                 ; rangées 1 et 2 = 16 octets
+@attributs:
         sta PPUDATA
         dex
-        bne @une_brique
-        iny
-        cpy #6
-        bne @rangee_briques
+        bne @attributs
         rts
 
 ; Adresses vidéo du début (colonne 0) des 6 rangées de briques.
-; Rangée de tuiles 5 → $2000 + 5×32 = $20A0, etc.
-; Deux tables séparées (octets bas / octets hauts) car le 6502 ne sait lire
-; qu'un octet à la fois.
 lignes_briques_lo:  .byte $A0, $C0, $E0, $00, $20, $40
 lignes_briques_hi:  .byte $20, $20, $20, $21, $21, $21
 
 
 ; =============================================================================
+;  L'ÉCRAN TITRE
+; =============================================================================
+;  Du TEXTE, enfin ! Chaque lettre est une tuile ($20 et suivantes), et une
+;  phrase n'est qu'une suite de numéros de tuiles rangée dans la ROM. On
+;  n'a dessiné QUE les lettres utiles : 13 lettres suffisent à nos trois
+;  phrases — sur une cartouche, chaque tuile compte.
+
+dessiner_ecran_titre:
+        jsr vider_interieur     ; efface le terrain de jeu (ou l'ancien texte)
+
+        bit PPUSTATUS
+        lda #$21                ; rangée 12, colonne 10
+        sta PPUADDR
+        lda #$8A
+        sta PPUADDR
+        ldx #0
+@titre:
+        lda texte_titre, x
+        sta PPUDATA
+        inx
+        cpx #12
+        bne @titre
+
+        lda #$21                ; rangée 15, colonne 11 : "RECORD " puis les
+        sta PPUADDR             ; 3 chiffres — qui suivent immédiatement en
+        lda #$EB                ; mémoire vidéo : l'adresse avance seule !
+        sta PPUADDR
+        ldx #0
+@record:
+        lda texte_record, x
+        sta PPUDATA
+        inx
+        cpx #7
+        bne @record
+        lda record_c
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+        lda record_d
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+        lda record_u
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+
+        lda #$22                ; rangée 18, colonne 8
+        sta PPUADDR
+        lda #$48
+        sta PPUADDR
+        ldx #0
+@appuie:
+        lda texte_appuie, x
+        sta PPUDATA
+        inx
+        cpx #16
+        bne @appuie
+        rts
+
+texte_titre:
+        .byte L_C, L_A, L_S, L_S, L_E, TIRET, L_B, L_R, L_I, L_Q, L_U, L_E
+texte_record:
+        .byte L_R, L_E, L_C, L_O, L_R, L_D, ESPACE
+texte_appuie:
+        .byte L_A, L_P, L_P, L_U, L_I, L_E, ESPACE, L_S, L_U, L_R, ESPACE
+        .byte L_S, L_T, L_A, L_R, L_T
+
+
+; -----------------------------------------------------------------------------
+;  vider_interieur : efface tout le terrain (rangées 4-29, entre les murs)
+; -----------------------------------------------------------------------------
+vider_interieur:
+        lda #$20
+        sta adr_hi
+        lda #$80                ; $2080 = rangée 4, colonne 0
+        sta adr_lo
+        ldx #26
+@rangee:
+        bit PPUSTATUS
+        lda adr_hi
+        sta PPUADDR
+        lda adr_lo
+        clc
+        adc #1                  ; colonne 1 : on épargne les murs
+        sta PPUADDR
+        lda #TUILE_VIDE
+        ldy #30
+@case:
+        sta PPUDATA
+        dey
+        bne @case
+        lda adr_lo
+        clc
+        adc #32
+        sta adr_lo
+        lda adr_hi
+        adc #0
+        sta adr_hi
+        dex
+        bne @rangee
+        rts
+
+
+; =============================================================================
+;  DÉMARRER UNE PARTIE, CHARGER UN NIVEAU
+; =============================================================================
+demarrer_partie:
+        lda #0
+        sta score_u
+        sta score_d
+        sta score_c
+        sta capsule_type
+        sta raquette_large
+        sta balle_lente
+        lda #3
+        sta vies
+        lda #1
+        sta niveau
+        lda #116
+        sta raquette_x
+        jsr eteindre_ecran
+        jsr charger_niveau
+        jsr allumer_ecran
+        lda #ETAT_ATTENTE
+        sta etat
+        rts
+
+; -----------------------------------------------------------------------------
+;  charger_niveau — remplit la grille depuis un MOTIF en ROM, et la dessine.
+;  À appeler écran éteint. Le motif est choisi par (niveau−1) modulo 4 :
+;  après le 4e niveau, les motifs reviennent, mais plus vite !
+; -----------------------------------------------------------------------------
+charger_niveau:
+        ; --- quel motif ? ------------------------------------------------------
+        lda niveau
+        sec
+        sbc #1
+        and #%00000011          ; modulo 4, sans division : merci le binaire
+        tax
+        lda motifs_lo, x
+        sta motif_ptr
+        lda motifs_hi, x
+        sta motif_ptr+1
+
+        ; --- copier les 96 cases du motif dans la grille -----------------------
+        ldy #0
+@copier:
+        lda (motif_ptr), y
+        sta grille, y
+        iny
+        cpy #96
+        bne @copier
+
+        ; --- compter les briques ------------------------------------------------
+        ;  Une solide compte pour UNE brique : elle ne sera décomptée qu'à sa
+        ;  destruction finale, pas à la fissure.
+        lda #0
+        sta briques_restantes
+        ldx #95
+@compter:
+        lda grille, x
+        beq @suivante
+        inc briques_restantes
+@suivante:
+        dex
+        bpl @compter
+
+        ; --- la vitesse du niveau -----------------------------------------------
+        ;  +0,25 pixel/image ($40 en 256e) par niveau, plafonné à +0,75 :
+        ;  au-delà, même un champion n'y verrait plus rien.
+        lda niveau
+        sec
+        sbc #1
+        cmp #4
+        bcc @vitesse_ok
+        lda #3
+@vitesse_ok:
+        asl a
+        asl a
+        asl a
+        asl a
+        asl a
+        asl a                   ; ×64 = ×$40
+        sta vitesse_extra
+
+        ; --- dessiner -----------------------------------------------------------
+        jsr vider_interieur
+        jsr dessiner_briques
+        rts
+
+; Où trouver chaque motif (4 tableaux de 96 octets, tout en bas du fichier)
+motifs_lo: .byte <motif_classique, <motif_damier, <motif_coeur, <motif_forteresse
+motifs_hi: .byte >motif_classique, >motif_damier, >motif_coeur, >motif_forteresse
+
+; -----------------------------------------------------------------------------
+;  dessiner_briques — traduit la grille en tuiles à l'écran (écran éteint)
+; -----------------------------------------------------------------------------
+dessiner_briques:
+        lda #0
+        sta lig_brique
+@rangee:
+        bit PPUSTATUS
+        ldy lig_brique
+        lda lignes_briques_hi, y
+        sta PPUADDR
+        lda lignes_briques_lo, y
+        clc
+        adc #1
+        sta PPUADDR
+        ; X = index de la première case de la rangée = rangée × 16
+        tya
+        asl a
+        asl a
+        asl a
+        asl a
+        tax
+        lda #15
+        sta tmp2
+@brique:
+        lda grille, x           ; le type de la brique...
+        tay
+        lda tuiles_brique_g, y  ; ...devient une paire de tuiles
+        sta PPUDATA
+        lda tuiles_brique_d, y
+        sta PPUDATA
+        inx
+        dec tmp2
+        bne @brique
+        inc lig_brique
+        lda lig_brique
+        cmp #6
+        bne @rangee
+        rts
+
+; L'apparence de chaque type (indexé par TYPE_...) :
+;                      vide        normale          solide          dorée          fissurée
+tuiles_brique_g: .byte TUILE_VIDE, TUILE_NORMALE_G, TUILE_SOLIDE_G, TUILE_DOREE_G, TUILE_FISSURE_G
+tuiles_brique_d: .byte TUILE_VIDE, TUILE_NORMALE_D, TUILE_SOLIDE_D, TUILE_DOREE_D, TUILE_FISSURE_D
+; ... et ce que rapporte sa destruction :
+points_brique:   .byte 0, 1, 0, 5, 2
+
+
+; =============================================================================
 ;  LA BOUCLE PRINCIPALE
 ; =============================================================================
-;  Le cœur du jeu. À chaque image (1/60e de seconde) :
-;    1. attendre le signal du VBlank (donné par la routine nmi) ;
-;    2. lire la manette ;
-;    3. faire la logique du jeu (déplacer, tester les collisions...) ;
-;    4. mettre à jour le brouillon des sprites.
-;  Puis on recommence, pour toujours. Un jeu, c'est une boucle infinie !
-
 principale:
         jsr attendre_nmi
-        jsr maj_musique         ; le son se met à jour à CHAQUE image, comme
-        jsr maj_bruitages       ; l'image elle-même : c'est ce qui donne un
-        jsr lire_manette        ; tempo parfaitement stable (60 Hz)
+        jsr maj_musique
+        jsr maj_bruitages
+        jsr lire_manette
         jsr maj_raquette
 
+        ; L'aiguillage des 5 états. Les branches conditionnelles du 6502 ne
+        ; portent qu'à ±127 octets : pour les destinations lointaines, on
+        ; branche sur un JMP tout proche, qui lui va où il veut.
         lda etat
         cmp #ETAT_JEU
-        beq @en_jeu
+        bne @pas_jeu
+        jmp @en_jeu
+@pas_jeu:
         cmp #ETAT_ATTENTE
-        beq @en_attente
+        bne @pas_attente
+        jmp @en_attente
+@pas_attente:
+        cmp #ETAT_TITRE
+        beq @au_titre
+        cmp #ETAT_PAUSE
+        beq @entracte
 
-        ; --- État FINI (gagné ou perdu) : on attend le bouton Start --------
-        lda boutons
-        and #BTN_START          ; AND isole le bit du bouton Start :
-        beq @dessiner           ; résultat nul = bouton relâché
-        jmp reset               ; on relance toute la console. Radical !
+        ; --- État FINI : Start ramène à l'écran titre ------------------------
+        lda presses
+        and #BTN_START
+        bne @retour_titre
+        jmp @dessiner
+@retour_titre:
+        jsr eteindre_ecran
+        jsr dessiner_ecran_titre
+        lda #ETAT_TITRE
+        sta etat
+        lda #3
+        sta vies                ; cosmétique : le bandeau du titre affiche 3
+        jsr demarrer_musique
+        jsr allumer_ecran
+        jmp @dessiner
+
+@au_titre:
+        lda presses
+        and #BTN_START
+        bne @lancer_partie
+        jmp @dessiner           ; (un BEQ n'irait pas si loin : les branches
+@lancer_partie:                 ;  conditionnelles portent à ±127 octets !)
+        jsr demarrer_partie
+        jsr bip_raquette
+        jmp @dessiner
+
+@entracte:
+        ; --- Entre deux niveaux : petite pause, puis niveau suivant ----------
+        dec pause_cpt
+        beq @niveau_suivant
+        jmp @dessiner
+@niveau_suivant:
+        inc niveau
+        lda #0
+        sta capsule_type
+        sta raquette_large
+        sta balle_lente
+        jsr eteindre_ecran
+        jsr charger_niveau
+        jsr allumer_ecran
+        lda #ETAT_ATTENTE
+        sta etat
+        jmp @dessiner
 
 @en_attente:
-        ; --- La balle est collée au centre de la raquette ------------------
+        ; --- La balle est collée au centre de la raquette ---------------------
         lda raquette_x
         clc
-        adc #8                  ; raquette 24 px, balle 8 px → décalage de 8
+        adc #8
         sta balle_x
-        lda #RAQUETTE_Y - 8     ; juste au-dessus de la raquette
+        lda #RAQUETTE_Y - 8
         sta balle_y
-
         lda boutons
         and #BTN_A
-        beq @dessiner           ; A pas pressé → on reste collé
-        ; A pressé : on lance la balle !
+        beq @dessiner
+        ; A pressé : on lance ! Vers le haut à 2 px/image (+ bonus du niveau),
+        ; et en diagonale douce, côté tiré à pile ou face sur le compteur
+        ; d'images.
         lda #ETAT_JEU
         sta etat
-        jsr bip_raquette        ; petit "top" de départ
-        lda #$FE                ; vers le haut (-2)
-        sta balle_dy
-        lda #2                  ; vers la droite (+2)...
-        sta balle_dx
-        lda image               ; ...sauf une image sur deux : le bit 0 du
-        and #1                  ; compteur d'images sert de pile-ou-face
+        jsr bip_raquette
+        lda #0
+        sec
+        sbc vitesse_extra       ; dy = −2,0 − extra : 0 − extra donne le bas...
+        sta balle_dy_lo
+        lda #$FE                ; ...et $FE − retenue donne le haut. Une
+        sbc #0                  ; soustraction 16 bits comme une autre !
+        sta balle_dy_hi
+        lda #0
+        sta balle_dx_lo
+        lda #1                  ; dx = +1,0...
+        sta balle_dx_hi
+        lda image
+        and #1
         beq @dessiner
-        lda #$FE                ; vers la gauche (-2)
-        sta balle_dx
+        lda #$FF                ; ...ou −1,0 : $FF00 = −256/256 = −1
+        sta balle_dx_hi
+        lda #0
+        sta balle_dx_lo
         jmp @dessiner
 
 @en_jeu:
         jsr deplacer_balle
+        jsr maj_capsule
+        jsr maj_minuteries
 
 @dessiner:
         jsr maj_sprites
-        jmp principale          ; et on recommence, à jamais
+        jmp principale
 
-
-; -----------------------------------------------------------------------------
-;  attendre_nmi : se synchroniser sur le VBlank
-; -----------------------------------------------------------------------------
-;  La routine nmi (en bas) incrémente `image` à chaque VBlank. On mémorise sa
-;  valeur, puis on tourne en rond tant qu'elle n'a pas changé. Cela garantit
-;  que la boucle principale tourne exactement 60 fois par seconde.
 
 attendre_nmi:
         lda image
 @patienter:
         cmp image
-        beq @patienter          ; tant que image n'a pas bougé, on attend
+        beq @patienter
         rts
 
 
 ; -----------------------------------------------------------------------------
-;  lire_manette : récupère l'état des 8 boutons
+;  lire_manette — avec détection des boutons "qui viennent d'être pressés"
 ; -----------------------------------------------------------------------------
-;  La manette NES est un "registre à décalage" : après un signal de verrouillage
-;  (écrire 1 puis 0 dans $4016), chaque lecture de $4016 donne UN bouton dans
-;  le bit 0, dans l'ordre : A, B, Select, Start, Haut, Bas, Gauche, Droite.
-;
-;  L'astuce LSR/ROL : LSR pousse le bit 0 (le bouton lu) dans la retenue,
-;  puis ROL fait entrer cette retenue par la droite de `boutons`. Après 8
-;  tours, les 8 boutons sont rangés dans l'octet, le bouton A en tête.
-
 lire_manette:
+        lda boutons
+        sta anciens
         lda #1
-        sta JOYPAD1             ; verrouille l'état des boutons...
+        sta JOYPAD1
         lda #0
-        sta JOYPAD1             ; ...et passe en mode lecture
+        sta JOYPAD1
         ldx #8
-@bouton_suivant:
+@bouton:
         lda JOYPAD1
-        lsr a                   ; bit 0 → retenue
-        rol boutons             ; retenue → bit 0 de `boutons` (tout glisse à gauche)
+        lsr a
+        rol boutons
         dex
-        bne @bouton_suivant
+        bne @bouton
+        lda anciens
+        eor #$FF                ; presses = (PAS anciens) ET boutons :
+        and boutons             ; 1 seulement l'image où le bouton s'enfonce
+        sta presses
         rts
 
 
 ; -----------------------------------------------------------------------------
-;  maj_raquette : déplace la raquette selon la croix directionnelle
+;  maj_raquette — déplacement, avec une largeur qui peut changer !
 ; -----------------------------------------------------------------------------
 maj_raquette:
         lda boutons
         and #BTN_GAUCHE
         beq @pas_a_gauche
         lda raquette_x
-        sec                     ; toujours mettre la retenue à 1 avant SBC !
-        sbc #2                  ; (SEC est à SBC ce que CLC est à ADC)
+        sec
+        sbc #2
         sta raquette_x
-        cmp #8                  ; a-t-on dépassé le mur de gauche ?
+        cmp #8
         bcs @pas_a_gauche
         lda #8
-        sta raquette_x          ; oui → on colle au mur
+        sta raquette_x
 @pas_a_gauche:
         lda boutons
         and #BTN_DROITE
@@ -663,83 +930,130 @@ maj_raquette:
         clc
         adc #2
         sta raquette_x
-        cmp #225                ; 224 est le maximum (224 + 24 px = mur droit)
+        ; la butée droite dépend de la largeur : 24 px (max 224) ou,
+        ; raquette élargie, 32 px (max 216)
+        ldx #224
+        lda raquette_large
+        beq @borne_choisie
+        ldx #216
+@borne_choisie:
+        stx tmp_lo
+        lda raquette_x
+        cmp tmp_lo
         bcc @pas_a_droite
-        lda #224
+        lda tmp_lo
         sta raquette_x
 @pas_a_droite:
         rts
 
 
-; -----------------------------------------------------------------------------
-;  deplacer_balle : mouvement + rebonds sur les murs
-; -----------------------------------------------------------------------------
+; =============================================================================
+;  deplacer_balle — mouvement en virgule fixe + rebonds sur les murs
+; =============================================================================
 deplacer_balle:
-        ; --- Axe horizontal -------------------------------------------------
-        lda balle_x
+        ; --- bonus "balle lente" : la balle ne bouge qu'une image sur deux ---
+        lda balle_lente
+        beq @pleine_vitesse
+        lda image
+        and #1
+        bne @pleine_vitesse
+        rts
+@pleine_vitesse:
+
+        ; --- axe X : les sous-pixels d'abord, la retenue passe aux pixels ----
+        lda balle_xs
         clc
-        adc balle_dx            ; additionner $FE revient à soustraire 2 :
-        sta balle_x             ; la magie du complément à deux !
+        adc balle_dx_lo
+        sta balle_xs
+        lda balle_x
+        adc balle_dx_hi
+        sta balle_x
         cmp #BALLE_X_MIN
-        bcs @pas_mur_gauche     ; BCS : "supérieur ou égal" → pas touché
+        bcs @pas_mur_gauche
         lda #BALLE_X_MIN
         sta balle_x
-        lda #2                  ; rebond : on repart vers la droite
-        sta balle_dx
+        lda balle_dx_hi         ; on repart vers la droite (si on allait bien
+        bpl @pas_mur_gauche     ; vers la gauche : prudence)
+        jsr inverser_dx
         jsr bip_mur
 @pas_mur_gauche:
         lda balle_x
         cmp #BALLE_X_MAX + 1
-        bcc @pas_mur_droit      ; BCC : "strictement inférieur" → pas touché
+        bcc @pas_mur_droit
         lda #BALLE_X_MAX
         sta balle_x
-        lda #$FE                ; rebond : on repart vers la gauche
-        sta balle_dx
+        lda balle_dx_hi
+        bmi @pas_mur_droit
+        jsr inverser_dx
         jsr bip_mur
 @pas_mur_droit:
 
-        ; --- Axe vertical ---------------------------------------------------
-        lda balle_y
+        ; --- axe Y -------------------------------------------------------------
+        lda balle_ys
         clc
-        adc balle_dy
+        adc balle_dy_lo
+        sta balle_ys
+        lda balle_y
+        adc balle_dy_hi
         sta balle_y
         cmp #BALLE_Y_MIN
         bcs @pas_mur_haut
         lda #BALLE_Y_MIN
         sta balle_y
-        lda #2                  ; rebond : on repart vers le bas
-        sta balle_dy
+        lda balle_dy_hi
+        bpl @pas_mur_haut
+        jsr inverser_dy
         jsr bip_mur
 @pas_mur_haut:
         lda balle_y
         cmp #BALLE_Y_PERDU
         bcc @pas_perdue
-        jmp perdre_vie          ; la balle est tombée ! (le RTS de perdre_vie
-                                ; nous fera revenir directement à l'appelant)
+        jmp perdre_vie
 @pas_perdue:
         jsr collision_briques
         jsr collision_raquette
         rts
 
-
 ; -----------------------------------------------------------------------------
-;  collision_briques : la balle touche-t-elle une brique ?
+;  inverser_dx / inverser_dy — l'opposé d'un nombre de 16 bits
 ; -----------------------------------------------------------------------------
-;  Principe : on convertit la position de la balle (en pixels) en coordonnées
-;  de tuile (division par 8), puis en coordonnées dans notre grille logique.
-;  Si la case de la grille contient un 1 : boum, on casse la brique.
-;
-;  Diviser par 8, c'est décaler 3 fois vers la droite (LSR), car chaque
-;  décalage divise par 2. De même, multiplier par 16 = 4 décalages à gauche.
-;  Les puissances de 2 sont les meilleures amies de l'assembleur.
+;  Comme sur 8 bits (inverser les bits puis +1), mais la retenue du +1
+;  traverse les deux octets. −(−1,5) = +1,5 : le rebond parfait.
+inverser_dx:
+        lda balle_dx_lo
+        eor #$FF
+        clc
+        adc #1
+        sta balle_dx_lo
+        lda balle_dx_hi
+        eor #$FF
+        adc #0
+        sta balle_dx_hi
+        rts
 
+inverser_dy:
+        lda balle_dy_lo
+        eor #$FF
+        clc
+        adc #1
+        sta balle_dy_lo
+        lda balle_dy_hi
+        eor #$FF
+        adc #0
+        sta balle_dy_hi
+        rts
+
+
+; =============================================================================
+;  collision_briques — v2 : trois familles de briques
+; =============================================================================
 collision_briques:
         lda balle_x
         clc
-        adc #4                  ; +4 : on teste le CENTRE de la balle
+        adc #4                  ; le CENTRE de la balle
         lsr a
         lsr a
-        lsr a                   ; ÷8 → numéro de colonne de tuile (0-31)
+        lsr a                   ; ÷8 → colonne de tuile
         sta col_tuile
         lda balle_y
         clc
@@ -749,142 +1063,104 @@ collision_briques:
         lsr a
         sta lig_tuile
 
-        ; La balle est-elle dans la zone des briques (rangées de tuiles 5-10) ?
-        lda lig_tuile
+        lda lig_tuile           ; dans la zone des briques (rangées 5-10) ?
         sec
         sbc #5
         cmp #6
-        bcs @rien               ; hors zone (l'astuce : si lig_tuile < 5, la
-        sta lig_brique          ; soustraction "boucle" vers 250+, donc ≥ 6)
-
-        ; ... et entre les murs (colonnes de tuiles 1-30) ?
-        lda col_tuile
-        beq @rien               ; colonne 0 = mur gauche
+        bcs @rien
+        sta lig_brique
+        lda col_tuile           ; entre les murs (colonnes 1-30) ?
+        beq @rien
         cmp #31
-        bcs @rien               ; colonne 31 = mur droit
+        bcs @rien
         sec
         sbc #1
-        lsr a                   ; ÷2 : chaque brique fait 2 tuiles de large
+        lsr a                   ; ÷2 : une brique = 2 tuiles
         sta col_brique
 
-        ; Position dans la grille : index = rangée × 16 + colonne
-        lda lig_brique
+        lda lig_brique          ; index = rangée × 16 + colonne
         asl a
         asl a
         asl a
-        asl a                   ; ×16
+        asl a
         clc
         adc col_brique
         tax
         lda grille, x
-        beq @rien               ; 0 = pas de brique ici → rien à faire
+        beq @rien               ; pas de brique ici
+        sta tmp2                ; on retient son TYPE
 
-        ; --- BOUM ! On casse la brique --------------------------------------
+        ; --- touché ! le rebond d'abord, quoi qu'il arrive --------------------
+        jsr inverser_dy
+
+        ; --- brique SOLIDE ? elle encaisse : elle se fissure -------------------
+        lda tmp2
+        cmp #TYPE_SOLIDE
+        bne @detruire
+        lda #TYPE_FISSUREE
+        sta grille, x           ; dans la grille...
+        ldy #TYPE_FISSUREE      ; ...et à l'écran, au prochain VBlank
+        jsr programmer_redessin
+        jsr bip_mur             ; "toc" : du solide !
+        rts
+
+@detruire:
+        ; --- toute autre brique est détruite -----------------------------------
         lda #0
-        sta grille, x           ; retirée de la grille logique
-
-        lda balle_dy            ; rebond : on inverse la vitesse verticale.
-        eor #$FF                ; inverser tous les bits puis ajouter 1 :
-        clc                     ; c'est comme ça qu'on calcule "moins A"
-        adc #1                  ; en complément à deux (-2 ↔ +2)
-        sta balle_dy
-
-        jsr incrementer_score
-        jsr bip_brique          ; "cling !"
+        sta grille, x
+        ldy tmp2
+        lda points_brique, y    ; 1, 2 ou 5 points selon le type
+        jsr ajouter_points
+        jsr bip_brique
+        ldy #0                  ; à l'écran : deux tuiles vides
+        jsr programmer_redessin
+        jsr lacher_capsule      ; une capsule bonus, peut-être ?
 
         dec briques_restantes
-        bne @pas_gagne
-        lda #ETAT_FINI          ; plus une seule brique : GAGNÉ !
+        bne @rien
+        ; --- plus une brique : NIVEAU TERMINÉ ! --------------------------------
+        lda #ETAT_PAUSE
         sta etat
-        jsr arreter_musique
+        lda #120                ; deux secondes d'entracte
+        sta pause_cpt
         jsr bip_victoire
-@pas_gagne:
-
-        ; On note l'adresse vidéo de la brique pour que la routine nmi
-        ; l'efface de l'écran au prochain VBlank.
-        lda col_brique
-        asl a                   ; ×2 : colonne de tuile relative
-        clc
-        adc #1                  ; +1 : décalage du mur de gauche
-        ldy lig_brique
-        clc
-        adc lignes_briques_lo, y
-        sta effacer_lo          ; (pas de retenue possible : chaque rangée
-        lda lignes_briques_hi, y ; commence à un multiple de 32 et on ajoute
-        sta effacer_hi          ; au plus 29)
-        lda #1
-        sta effacer_actif
 @rien:
         rts
 
-
 ; -----------------------------------------------------------------------------
-;  collision_raquette : la balle rebondit-elle sur la raquette ?
+;  programmer_redessin — note l'adresse et les tuiles pour la nmi
 ; -----------------------------------------------------------------------------
-collision_raquette:
-        lda balle_dy
-        bmi @rate               ; BMI : si dy est négatif (balle qui monte),
-                                ; inutile de tester — on ne rebondit qu'en
-                                ; descendant, sinon la balle resterait collée
-
-        lda balle_y             ; la balle est-elle à hauteur de raquette ?
-        cmp #RAQUETTE_Y - 8     ; (bas de la balle = balle_y + 8)
-        bcc @rate               ; trop haut
-        cmp #RAQUETTE_Y
-        bcs @rate               ; trop bas, déjà passée
-
-        ; Test de chevauchement horizontal, version astucieuse : on calcule
-        ; (balle_x - raquette_x + 7). Si le résultat est entre 0 et 30, les
-        ; deux se touchent. Un seul CMP au lieu de deux comparaisons !
-        lda balle_x
-        sec
-        sbc raquette_x
+;  Entrée : Y = le type à AFFICHER (0 = effacer, TYPE_FISSUREE = fissurer).
+;  Utilise col_brique / lig_brique laissés par collision_briques.
+programmer_redessin:
+        lda tuiles_brique_g, y
+        sta effacer_tg
+        lda tuiles_brique_d, y
+        sta effacer_td
+        lda col_brique
+        asl a
         clc
-        adc #7
-        cmp #31
-        bcs @rate
-
-        ; --- Touché ! La moitié de raquette frappée décide de la direction --
-        cmp #15                 ; A contient toujours la position d'impact
-        bcc @vers_la_gauche
-        lda #2                  ; moitié droite → la balle part à droite
-        sta balle_dx
-        jmp @rebondir
-@vers_la_gauche:
-        lda #$FE                ; moitié gauche → la balle part à gauche
-        sta balle_dx
-@rebondir:
-        lda #$FE                ; et dans tous les cas, on remonte !
-        sta balle_dy
-        jsr bip_raquette
-@rate:
+        adc #1
+        ldy lig_brique
+        clc
+        adc lignes_briques_lo, y
+        sta effacer_lo
+        lda lignes_briques_hi, y
+        sta effacer_hi
+        lda #1
+        sta effacer_actif
         rts
 
-
 ; -----------------------------------------------------------------------------
-;  perdre_vie
+;  ajouter_points — A = combien (1 à 5), en décimal chiffre par chiffre
 ; -----------------------------------------------------------------------------
-perdre_vie:
-        dec vies
-        beq @plus_de_vies
-        lda #ETAT_ATTENTE       ; il reste des vies : la balle revient se
-        sta etat                ; coller à la raquette
-        jmp bruit_vie           ; "pshh" de dépit (son rts nous fera revenir)
-@plus_de_vies:
-        lda #ETAT_FINI
-        sta etat
-        lda #$F0                ; cache la balle sous le bas de l'écran
-        sta balle_y
-        jsr arreter_musique     ; silence, défaite...
-        jmp bruit_fin           ; ...et long grondement (son rts conclura)
-
-
-; -----------------------------------------------------------------------------
-;  incrementer_score : +1 en "décimal", chiffre par chiffre
-; -----------------------------------------------------------------------------
-;  On stocke chaque chiffre séparément (unités, dizaines, centaines) : c'est
-;  plus simple à afficher, et l'addition avec retenue se fait à la main,
-;  comme à l'école primaire !
+ajouter_points:
+        sta tmp_lo
+@encore:
+        jsr incrementer_score
+        dec tmp_lo
+        bne @encore
+        rts
 
 incrementer_score:
         inc score_u
@@ -893,37 +1169,291 @@ incrementer_score:
         bne @fini
         lda #0
         sta score_u
-        inc score_d             ; 9 → 0, et on retient 1...
+        inc score_d
         lda score_d
         cmp #10
         bne @fini
         lda #0
         sta score_d
         inc score_c
+        lda score_c
+        cmp #10
+        bne @fini
+        lda #0                  ; 999 + 1 = 000. Les puristes apprécieront.
+        sta score_c
 @fini:
+        rts
+
+
+; =============================================================================
+;  collision_raquette — v2 : CINQ zones, cinq angles !
+; =============================================================================
+;  C'est LA grande nouveauté du gameplay. La raquette est découpée en 5
+;  zones : frapper du bout renvoie la balle très inclinée, frapper au
+;  centre la renvoie presque verticale. Les vitesses sont des paires
+;  (dx, dy) en virgule fixe, rangées dans des tables — visez bien !
+;
+;      zone :    0        1        2        3        4
+;      dx   :  −2,0     −1,5    ±0,5     +1,5     +2,0
+;      dy   :  −1,0     −1,75   −2,25    −1,75    −1,0
+
+collision_raquette:
+        lda balle_dy_hi
+        bmi @rate               ; la balle monte : rien à faire
+
+        lda balle_y             ; à hauteur de raquette ?
+        cmp #RAQUETTE_Y - 8
+        bcc @rate
+        cmp #RAQUETTE_Y
+        bcs @rate
+
+        ; point d'impact = balle_x − raquette_x + 7 : entre 0 et 30 (raquette
+        ; normale) ou 0 et 38 (élargie), sinon c'est raté
+        lda balle_x
+        sec
+        sbc raquette_x
+        clc
+        adc #7
+        ldx raquette_large
+        beq @largeur_normale
+        cmp #39
+        bcs @rate
+        sec                     ; élargie : on recentre l'impact sur 0-30
+        sbc #4                  ; pour garder les mêmes 5 zones
+        bcs @impact_connu
+        lda #0
+        jmp @impact_connu
+@largeur_normale:
+        cmp #31
+        bcs @rate
+@impact_connu:
+        ; --- quelle zone ? ------------------------------------------------------
+        ldy #0
+        cmp #6
+        bcc @zone_choisie
+        iny
+        cmp #12
+        bcc @zone_choisie
+        iny
+        cmp #19
+        bcc @zone_choisie
+        iny
+        cmp #25
+        bcc @zone_choisie
+        iny                     ; zone 4
+@zone_choisie:
+        cpy #2
+        bne @dx_table
+        ; --- zone centrale : dx = ±0,5, en GARDANT le sens actuel -------------
+        lda balle_dx_hi
+        bmi @centre_gauche
+        lda #$80
+        sta balle_dx_lo
+        lda #$00
+        sta balle_dx_hi
+        jmp @regler_dy
+@centre_gauche:
+        lda #$80
+        sta balle_dx_lo
+        lda #$FF                ; $FF80 = −0,5
+        sta balle_dx_hi
+        jmp @regler_dy
+@dx_table:
+        lda zones_dx_lo, y
+        sta balle_dx_lo
+        lda zones_dx_hi, y
+        sta balle_dx_hi
+@regler_dy:
+        lda zones_dy_lo, y      ; dy de la zone, PLUS la vitesse du niveau
+        sec                     ; (dy est négatif : soustraire = accélérer
+        sbc vitesse_extra       ; vers le haut)
+        sta balle_dy_lo
+        lda zones_dy_hi, y
+        sbc #0
+        sta balle_dy_hi
+        jsr bip_raquette
+@rate:
+        rts
+
+; Les 5 paires (dx, dy) en virgule fixe 8.8. La zone 2 (centre) a un dx
+; spécial géré dans le code ; sa colonne ici ne sert que de bouche-trou.
+zones_dx_lo: .byte $00, $80, $80, $80, $00
+zones_dx_hi: .byte $FE, $FE, $00, $01, $02
+zones_dy_lo: .byte $00, $40, $C0, $40, $00
+zones_dy_hi: .byte $FF, $FE, $FD, $FE, $FF
+
+
+; =============================================================================
+;  LES CAPSULES BONUS
+; =============================================================================
+;  Quand une brique meurt, une chance sur quatre qu'une capsule en tombe
+;  (s'il n'y en a pas déjà une). L'attraper avec la raquette donne son
+;  bonus. Les trois bonus sont distribués à tour de rôle : pas besoin d'un
+;  vrai générateur aléatoire, un compteur suffit — et le moment du tirage
+;  (image + position de la balle) est déjà bien imprévisible.
+
+lacher_capsule:
+        lda capsule_type
+        bne @fin                ; déjà une capsule en l'air
+        lda image
+        eor balle_x             ; notre "dé" : 2 bits qui valsent sans arrêt
+        and #%00000011
+        bne @fin                ; raté (3 chances sur 4)
+        lda capsule_suivante    ; à qui le tour ?
+        clc
+        adc #1
+        cmp #4
+        bcc @type_ok
+        lda #1
+@type_ok:
+        sta capsule_suivante
+        sta capsule_type
+        lda col_brique          ; la capsule naît au milieu de la brique
+        asl a
+        asl a
+        asl a
+        asl a                   ; colonne × 16...
+        clc
+        adc #12                 ; ...+ 8 (mur) + 4 (centrage)
+        sta capsule_x
+        lda lig_brique
+        asl a
+        asl a
+        asl a                   ; rangée × 8...
+        clc
+        adc #40                 ; ...+ 40 (le haut des briques)
+        sta capsule_y
+@fin:
+        rts
+
+maj_capsule:
+        lda capsule_type
+        beq @fin
+        inc capsule_y           ; elle tombe d'un pixel par image
+        lda capsule_y
+        cmp #BALLE_Y_PERDU
+        bcc @pas_perdue
+        lda #0                  ; perdue dans les profondeurs...
+        sta capsule_type
+        rts
+@pas_perdue:
+        cmp #RAQUETTE_Y - 8     ; à hauteur de raquette ?
+        bcc @fin
+        cmp #RAQUETTE_Y
+        bcs @fin
+        lda capsule_x           ; chevauchement horizontal, comme la balle
+        sec
+        sbc raquette_x
+        clc
+        adc #7
+        ldx raquette_large
+        beq @normale
+        cmp #39
+        bcs @fin
+        bcc @attrapee
+@normale:
+        cmp #31
+        bcs @fin
+@attrapee:
+        lda capsule_type
+        cmp #CAPS_LARGE
+        beq @elargir
+        cmp #CAPS_LENTE
+        beq @ralentir
+        lda vies                ; CAPS_VIE : +1 vie, 9 au maximum
+        cmp #9
+        bcs @consommer
+        inc vies
+        jmp @consommer
+@elargir:
+        lda #150                ; ~10 secondes (décompte toutes les 4 images)
+        sta raquette_large
+        jmp @consommer
+@ralentir:
+        lda #150
+        sta balle_lente
+@consommer:
+        lda #0
+        sta capsule_type
+        jsr bip_bonus
+@fin:
+        rts
+
+; Les minuteries des bonus fondent d'un cran toutes les 4 images
+maj_minuteries:
+        lda image
+        and #%00000011
+        bne @fin
+        lda raquette_large
+        beq @lente
+        dec raquette_large
+@lente:
+        lda balle_lente
+        beq @fin
+        dec balle_lente
+@fin:
+        rts
+
+
+; =============================================================================
+;  perdre_vie — et la gestion du RECORD
+; =============================================================================
+perdre_vie:
+        lda #0                  ; la balle emporte les bonus avec elle
+        sta capsule_type
+        sta raquette_large
+        sta balle_lente
+        dec vies
+        beq @plus_de_vies
+        lda #ETAT_ATTENTE
+        sta etat
+        jmp bruit_vie
+@plus_de_vies:
+        lda #ETAT_FINI
+        sta etat
+        lda #$F0                ; cache la balle sous l'écran
+        sta balle_y
+        jsr maj_record
+        jsr arreter_musique
+        jmp bruit_fin
+
+; -----------------------------------------------------------------------------
+;  maj_record — score > record ? Une comparaison à 3 chiffres se fait comme
+;  dans le dictionnaire : centaines d'abord, et on ne regarde la suite qu'en
+;  cas d'égalité.
+; -----------------------------------------------------------------------------
+maj_record:
+        lda score_c
+        cmp record_c
+        bcc @non
+        bne @oui
+        lda score_d
+        cmp record_d
+        bcc @non
+        bne @oui
+        lda score_u
+        cmp record_u
+        bcc @non
+        beq @non
+@oui:
+        lda score_u
+        sta record_u
+        lda score_d
+        sta record_d
+        lda score_c
+        sta record_c
+@non:
         rts
 
 
 ; =============================================================================
 ;  LE SON — un juke-box en 6502
 ; =============================================================================
-;  Le principe est le même que pour l'image : l'APU ne "joue" pas une
-;  chanson tout seul, il tient une note tant qu'on ne lui dit rien. C'est
-;  donc NOUS qui, à chaque image (60 fois/seconde), décomptons la durée de
-;  la note en cours et envoyons la suivante quand c'est l'heure. Une
-;  partition n'est qu'une suite d'octets : note, durée, note, durée...
-;
-;  Notre orchestre :  carré 2 = la mélodie,  triangle = la basse,
-;                     carré 1 = les bips,    bruit = les percussions/chocs.
-
-; -----------------------------------------------------------------------------
-;  demarrer_musique / arreter_musique
-; -----------------------------------------------------------------------------
 demarrer_musique:
         lda #1
         sta mus_active
-        sta mel_cpt             ; "1 image restante" : la première note
-        sta bas_cpt             ; partira dès la prochaine mise à jour
+        sta mel_cpt
+        sta bas_cpt
         lda #0
         sta mel_pos
         sta bas_pos
@@ -932,15 +1462,12 @@ demarrer_musique:
 arreter_musique:
         lda #0
         sta mus_active
-        lda #%00110000          ; volume 0 sur la mélodie...
+        lda #%00110000
         sta CARRE2_VOL
-        lda #%10000000          ; ...et compteur linéaire à 0 : le triangle
-        sta TRI_LIN             ; se taira tout seul
+        lda #%10000000
+        sta TRI_LIN
         rts
 
-; -----------------------------------------------------------------------------
-;  maj_musique — appelée à chaque image : fait avancer la partition
-; -----------------------------------------------------------------------------
 maj_musique:
         lda mus_active
         bne @active
@@ -948,36 +1475,35 @@ maj_musique:
 @active:
         ; ---------- la MÉLODIE, sur le canal carré 2 ----------
         dec mel_cpt
-        bne @basse              ; la note en cours n'est pas finie
+        bne @basse
         ldx mel_pos
         lda melodie, x
-        cmp #$FF                ; $FF = fin de la partition...
+        cmp #$FF
         bne @note_lue
-        ldx #0                  ; ...alors on reprend au début : la boucle !
+        ldx #0
         lda melodie, x
 @note_lue:
-        beq @soupir             ; note 0 = un silence
-        tay                     ; Y = numéro de la note
-        lda #%10110110          ; timbre : onde carrée 50 %, volume 6
-        sta CARRE2_VOL          ;   (les 2 bits du haut = le "duty" : la
-        lda #$08                ;    forme de l'onde, donc le timbre !)
-        sta CARRE2_BAL          ; balayage neutralisé (sinon il coupe les graves)
-        lda notes_bas, y        ; la période de la note, octet bas...
+        beq @soupir
+        tay
+        lda #%10110110          ; onde carrée 50 %, volume 6
+        sta CARRE2_VOL
+        lda #$08
+        sta CARRE2_BAL
+        lda notes_bas, y
         sta CARRE2_BAS
-        lda notes_haut, y       ; ...et octet haut
+        lda notes_haut, y
         ora #%11111000
         sta CARRE2_HAUT
         jmp @duree
 @soupir:
-        lda #%00110000          ; volume 0 = chut
+        lda #%00110000
         sta CARRE2_VOL
 @duree:
         inx
-        lda melodie, x          ; l'octet suivant est la durée en images
+        lda melodie, x
         sta mel_cpt
         inx
         stx mel_pos
-
 @basse:
         ; ---------- la BASSE, sur le canal triangle ----------
         dec bas_cpt
@@ -990,9 +1516,9 @@ maj_musique:
         lda basse, x
 @basse_lue:
         tay
-        lda #%11111111          ; compteur linéaire au maximum : joue !
-        sta TRI_LIN             ; (le triangle n'a pas de volume : il est
-        lda notes_bas, y        ;  toujours à fond, doux et rond)
+        lda #%11111111
+        sta TRI_LIN
+        lda notes_bas, y
         sta TRI_BAS
         lda notes_haut, y
         ora #%11111000
@@ -1005,13 +1531,6 @@ maj_musique:
 @fin:
         rts
 
-; -----------------------------------------------------------------------------
-;  LA PARTITION — modifiez-la, c'est fait pour !
-; -----------------------------------------------------------------------------
-;  Format : note, durée (en images ; 12 images ≈ une croche allègre), ...
-;  et $FF pour boucler. Quatre mesures sur l'enchaînement do / la mineur /
-;  fa / sol : le "I-vi-IV-V", l'accord secret de la moitié des tubes.
-
 melodie:
         .byte NOTE_DO5,  12, NOTE_MI5, 12, NOTE_SOL5, 12, NOTE_MI5, 12
         .byte NOTE_LA4,  12, NOTE_DO5, 12, NOTE_MI5,  12, NOTE_DO5, 12
@@ -1023,19 +1542,9 @@ basse:
         .byte NOTE_DO3, 48, NOTE_LA2, 48, NOTE_FA2, 48, NOTE_SOL2, 48
         .byte $FF
 
-; Les périodes des notes (voir la formule près des constantes NOTE_*).
-; L'index 0 est le silence : jamais lu, mais il cale les tables.
 ;                 sil  fa2  sol2 la2  do3  fa4  sol4 la4  si4  do5  ré5  mi5  fa5  sol5 la5
 notes_bas:  .byte $00, $00, $74, $F8, $56, $3F, $1C, $FD, $E1, $D5, $BD, $A9, $9F, $8E, $7E
 notes_haut: .byte $00, $05, $04, $03, $03, $01, $01, $00, $00, $00, $00, $00, $00, $00, $00
-
-; -----------------------------------------------------------------------------
-;  LES BRUITAGES
-; -----------------------------------------------------------------------------
-;  Un bruitage, c'est : régler un canal, noter une durée, et maj_bruitages
-;  coupera le son quand elle sera écoulée. Le canal carré 1 fait les bips
-;  (chaque événement a sa hauteur : plus c'est important, plus c'est aigu),
-;  le canal de bruit fait les catastrophes.
 
 ; A = période octet bas, X = période octet haut, Y = durée en images
 jouer_bip:
@@ -1043,7 +1552,7 @@ jouer_bip:
         txa
         ora #%11111000
         sta CARRE1_HAUT
-        lda #%10111010          ; onde carrée 50 %, volume 10
+        lda #%10111010
         sta CARRE1_VOL
         lda #$08
         sta CARRE1_BAL
@@ -1053,19 +1562,19 @@ jouer_bip:
 ; A = période du bruit (0 = aigu ... 15 = grave), Y = durée en images
 jouer_bruit:
         sta BRUIT_PER
-        lda #%00111010          ; volume 10
+        lda #%00111010
         sta BRUIT_VOL
         lda #%11111000
-        sta BRUIT_LON           ; déclenche le canal
+        sta BRUIT_LON
         sty bruit_cpt
         rts
 
 maj_bruitages:
         lda bip_cpt
-        beq @bruit              ; pas de bip en cours
+        beq @bruit
         dec bip_cpt
-        bne @bruit              ; toujours en cours
-        lda #%00110000          ; fini : volume 0
+        bne @bruit
+        lda #%00110000
         sta CARRE1_VOL
 @bruit:
         lda bruit_cpt
@@ -1077,28 +1586,33 @@ maj_bruitages:
 @fin:
         rts
 
-; Le "catalogue" : un petit réglage par événement du jeu.
-bip_mur:                        ; toc discret, médium
+; Le catalogue des sons :
+bip_mur:                        ; toc discret (murs, briques solides)
         lda #$1C
-        ldx #$01                ; période $011C = sol4
+        ldx #$01
         ldy #3
         jmp jouer_bip
-bip_raquette:                   ; ponk plus haut
+bip_raquette:                   ; ponk (raquette, lancement, Start)
         lda #$FD
-        ldx #$00                ; période $00FD = la4
+        ldx #$00
         ldy #4
         jmp jouer_bip
-bip_brique:                     ; cling ! aigu
+bip_brique:                     ; cling ! une brique de moins
         lda #$6A
-        ldx #$00                ; période $006A ≈ do6
+        ldx #$00
         ldy #4
         jmp jouer_bip
-bip_victoire:                   ; une grande note claire
+bip_bonus:                      ; l'éclat d'une capsule attrapée
+        lda #$8E
+        ldx #$00
+        ldy #6
+        jmp jouer_bip
+bip_victoire:                   ; niveau terminé !
         lda #$7E
-        ldx #$00                ; période $007E = la5
+        ldx #$00
         ldy #40
         jmp jouer_bip
-bruit_vie:                      ; "pshh" : une vie s'envole
+bruit_vie:                      ; pshh : une vie s'envole
         lda #$0A
         ldy #20
         jmp jouer_bruit
@@ -1108,27 +1622,33 @@ bruit_fin:                      ; long grondement de game over
         jmp jouer_bruit
 
 
-; -----------------------------------------------------------------------------
-;  maj_sprites : remplit le "brouillon" des sprites en RAM ($0200-$02FF)
-; -----------------------------------------------------------------------------
-;  Chaque sprite occupe 4 octets : Y, numéro de tuile, attributs, X.
-;  (Attributs : les 2 bits du bas choisissent la palette de sprite.)
-;  On écrit dans la RAM ordinaire, et la routine nmi enverra le tout au PPU
-;  d'un seul coup grâce au DMA. Petit détail matériel : le PPU affiche les
-;  sprites une ligne plus bas que leur Y — à notre échelle, on l'ignore.
-
+; =============================================================================
+;  maj_sprites — balle, raquette (3 OU 4 segments !), capsule
+; =============================================================================
 maj_sprites:
-        ; --- Sprite 0 : la balle -----------------------------------------
+        lda etat
+        cmp #ETAT_TITRE
+        bne @en_jeu
+        lda #$F0                ; au titre : tout le monde en coulisses
+        sta $0200
+        sta $0204
+        sta $0208
+        sta $020C
+        sta $0210
+        sta $0214
+        rts
+@en_jeu:
+        ; --- Sprite 0 : la balle ------------------------------------------------
         lda balle_y
-        sta $0200               ; Y
+        sta $0200
         lda #TUILE_BALLE
-        sta $0201               ; tuile
+        sta $0201
         lda #0
-        sta $0202               ; attributs : palette de sprite 0
+        sta $0202
         lda balle_x
-        sta $0203               ; X
+        sta $0203
 
-        ; --- Sprites 1 à 3 : la raquette (3 morceaux de 8 px) -------------
+        ; --- Sprites 1-3 : la raquette -------------------------------------------
         lda #RAQUETTE_Y
         sta $0204
         sta $0208
@@ -1137,9 +1657,15 @@ maj_sprites:
         sta $0205
         lda #TUILE_RAQ_M
         sta $0209
-        lda #TUILE_RAQ_D
-        sta $020D
-        lda #1                  ; attributs : palette de sprite 1 (bleu)
+        ; le 3e segment : bout droit... sauf si la raquette est élargie,
+        ; auquel cas c'est un segment du milieu de plus
+        ldx #TUILE_RAQ_D
+        lda raquette_large
+        beq @segment3
+        ldx #TUILE_RAQ_M
+@segment3:
+        stx $020D
+        lda #1
         sta $0206
         sta $020A
         sta $020E
@@ -1151,54 +1677,82 @@ maj_sprites:
         clc
         adc #8
         sta $020F
+
+        ; --- Sprite 4 : le 4e segment (raquette élargie seulement) ---------------
+        lda raquette_large
+        beq @cacher_segment4
+        lda #RAQUETTE_Y
+        sta $0210
+        lda #TUILE_RAQ_D
+        sta $0211
+        lda #1
+        sta $0212
+        lda raquette_x
+        clc
+        adc #24
+        sta $0213
+        jmp @capsule
+@cacher_segment4:
+        lda #$F0
+        sta $0210
+
+@capsule:
+        ; --- Sprite 5 : la capsule bonus ------------------------------------------
+        lda capsule_type
+        beq @cacher_capsule
+        tay
+        lda capsule_y
+        sta $0214
+        lda tuiles_capsules, y
+        sta $0215
+        lda #2                  ; palette 2 (or / rouge / blanc)
+        sta $0216
+        lda capsule_x
+        sta $0217
         rts
+@cacher_capsule:
+        lda #$F0
+        sta $0214
+        rts
+
+tuiles_capsules: .byte 0, TUILE_CAPS_LARGE, TUILE_CAPS_LENTE, TUILE_CAPS_VIE
 
 
 ; =============================================================================
 ;  NMI : exécutée automatiquement à CHAQUE VBlank (60 fois par seconde)
 ; =============================================================================
-;  C'est le SEUL moment où l'on peut toucher à la mémoire vidéo sans abîmer
-;  l'image. On fait donc ici, et seulement ici :
-;    - l'envoi du brouillon de sprites au PPU (DMA) ;
-;    - l'effacement d'une brique cassée ;
-;    - l'affichage du score et des vies ;
-;    - la remise à zéro du défilement (le PPU l'exige après nos écritures).
-
 nmi:
-        pha                     ; la NMI peut interrompre le code N'IMPORTE OÙ:
-        txa                     ; on sauvegarde A, X et Y sur la pile pour
-        pha                     ; les rendre intacts en partant. La pile est
-        tya                     ; une pile d'assiettes : dernier posé,
-        pha                     ; premier repris !
+        pha
+        txa
+        pha
+        tya
+        pha
 
-        ; --- 1) Envoi des 64 sprites : le DMA copie d'un bloc les 256 octets
-        ;        de la page $0200 vers la mémoire des sprites du PPU.
-        lda #$00
+        lda #$00                ; 1) les 64 sprites, d'un bloc
         sta OAMADDR
-        lda #$02                ; $02 = page mémoire $0200
+        lda #$02
         sta OAMDMA
 
-        ; --- 2) Une brique à effacer ? -------------------------------------
-        lda effacer_actif
-        beq @pas_de_brique
+        lda effacer_actif       ; 2) une brique à redessiner ? (v2 : effacer
+        beq @pas_de_brique      ;    OU fissurer — les tuiles sont dans la file)
         bit PPUSTATUS
         lda effacer_hi
         sta PPUADDR
         lda effacer_lo
         sta PPUADDR
-        lda #TUILE_VIDE
-        sta PPUDATA             ; efface la moitié gauche...
-        sta PPUDATA             ; ...et la droite (l'adresse avance seule)
+        lda effacer_tg
+        sta PPUDATA
+        lda effacer_td
+        sta PPUDATA
         lda #0
         sta effacer_actif
 @pas_de_brique:
 
-        ; --- 3) Le score (3 chiffres, rangée 2, colonnes 4-6) ---------------
-        ;  Le chiffre 0 est la tuile $10, donc tuile = chiffre + $10.
+        ; 3) Le bandeau : score, niveau, vies
         bit PPUSTATUS
         lda #$20
         sta PPUADDR
-        lda #$44                ; $2044 = rangée 2, colonne 4
+        lda #$44                ; $2044 = rangée 2, colonnes 4-6 : le score
         sta PPUADDR
         lda score_c
         clc
@@ -1212,20 +1766,24 @@ nmi:
         clc
         adc #TUILE_CHIFFRE_0
         sta PPUDATA
-
-        ; --- 4) Les vies (rangée 2, colonne 27) ------------------------------
         lda #$20
         sta PPUADDR
-        lda #$5B                ; $205B = rangée 2, colonne 27
+        lda #$4F                ; $204F = colonne 15 : le niveau
+        sta PPUADDR
+        lda niveau
+        clc
+        adc #TUILE_CHIFFRE_0
+        sta PPUDATA
+        lda #$20
+        sta PPUADDR
+        lda #$5B                ; $205B = colonne 27 : les vies
         sta PPUADDR
         lda vies
         clc
         adc #TUILE_CHIFFRE_0
         sta PPUDATA
 
-        ; --- 5) Remise à zéro du défilement ----------------------------------
-        ;  Nos écritures via PPUADDR ont déplacé le "viseur" du PPU : sans
-        ;  cette remise à zéro, l'écran partirait dans tous les sens.
+        ; 4) Remise à zéro du défilement
         bit PPUSTATUS
         lda #0
         sta PPUSCROLL
@@ -1233,34 +1791,68 @@ nmi:
         lda #%10000000
         sta PPUCTRL
 
-        inc image               ; le top d'horloge qu'attend la boucle principale
+        inc image
 
-        pla                     ; on restaure Y, X et A (ordre inverse de
-        tay                     ; l'empilement : dernier entré, premier sorti)
+        pla
+        tay
         pla
         tax
         pla
-        rti                     ; ReTurn from Interrupt : reprend le programme
-                                ; interrompu exactement où il en était
+        rti
 
-
-; -----------------------------------------------------------------------------
-;  IRQ : autre type d'interruption, inutilisée ici
-; -----------------------------------------------------------------------------
 irq:
         rti
 
 
 ; =============================================================================
+;  LES MOTIFS DE NIVEAUX — le level design, c'est ici !
+; =============================================================================
+;  Chaque motif est la grille complète : 6 rangées de 16 cases (15 briques
+;  + 1 case de bourrage, toujours à 0). Les lettres :
+;     V = vide   N = normale (1 pt)   S = solide (2 coups)   D = dorée (5 pts)
+;  Dessinez vos propres niveaux — c'est fait pour !
+
+V = 0
+N = TYPE_NORMALE
+S = TYPE_SOLIDE
+D = TYPE_DOREE
+
+motif_classique:                        ; niveau 1 : l'échauffement,
+        .byte D,D,D,D,D,D,D,D,D,D,D,D,D,D,D, V   ; avec un toit doré
+        .byte N,N,N,N,N,N,N,N,N,N,N,N,N,N,N, V
+        .byte N,N,N,N,N,N,N,N,N,N,N,N,N,N,N, V
+        .byte N,N,N,N,N,N,N,N,N,N,N,N,N,N,N, V
+        .byte N,N,N,N,N,N,N,N,N,N,N,N,N,N,N, V
+        .byte N,N,N,N,N,N,N,N,N,N,N,N,N,N,N, V
+
+motif_damier:                           ; niveau 2 : le damier, gare aux
+        .byte N,V,N,V,N,V,N,V,N,V,N,V,N,V,N, V   ; trous ! et un plancher
+        .byte V,N,V,N,V,N,V,N,V,N,V,N,V,N,V, V   ; blindé
+        .byte N,V,N,V,N,V,N,V,N,V,N,V,N,V,N, V
+        .byte V,N,V,N,V,N,V,N,V,N,V,N,V,N,V, V
+        .byte N,V,N,V,N,V,N,V,N,V,N,V,N,V,N, V
+        .byte S,S,S,S,S,S,S,S,S,S,S,S,S,S,S, V
+
+motif_coeur:                            ; niveau 3 : tout cœur, fourré à l'or
+        .byte V,N,N,N,V,V,V,V,V,V,V,N,N,N,V, V
+        .byte N,D,D,D,N,V,V,V,V,V,N,D,D,D,N, V
+        .byte N,D,D,D,D,D,D,D,D,D,D,D,D,D,N, V
+        .byte V,N,D,D,D,D,D,D,D,D,D,D,D,N,V, V
+        .byte V,V,V,N,D,D,D,D,D,D,D,N,V,V,V, V
+        .byte V,V,V,V,V,V,N,N,N,V,V,V,V,V,V, V
+
+motif_forteresse:                       ; niveau 4 : la forteresse et ses
+        .byte S,S,S,S,S,S,S,S,S,S,S,S,S,S,S, V   ; coffres au trésor
+        .byte S,N,N,N,N,N,N,N,N,N,N,N,N,N,S, V
+        .byte S,N,D,D,N,N,D,D,D,N,N,D,D,N,S, V
+        .byte S,N,D,D,N,N,D,D,D,N,N,D,D,N,S, V
+        .byte S,N,N,N,N,N,N,N,N,N,N,N,N,N,S, V
+        .byte S,S,S,S,S,S,S,S,S,S,S,S,S,S,S, V
+
+
+; =============================================================================
 ;  LES VECTEURS
 ; =============================================================================
-;  Les 6 derniers octets de la ROM. Le CPU y lit, câblé en dur :
-;    $FFFA-$FFFB : où aller lors d'une NMI
-;    $FFFC-$FFFD : où aller à l'allumage (reset)
-;    $FFFE-$FFFF : où aller lors d'une IRQ
-;  `.word` écrit une adresse sur 2 octets (octet bas d'abord : le 6502 est
-;  "petit-boutiste" / little-endian).
-
 .segment "VECTORS"
         .word nmi, reset, irq
 
@@ -1268,19 +1860,9 @@ irq:
 ; =============================================================================
 ;  LES GRAPHISMES (CHR-ROM) : nos tuiles, dessinées octet par octet !
 ; =============================================================================
-;  Chaque tuile de 8×8 pixels occupe 16 octets, organisés en DEUX "plans" :
-;    - octets 0-7  : le plan 0 (bit faible de la couleur de chaque pixel)
-;    - octets 8-15 : le plan 1 (bit fort)
-;  La couleur d'un pixel (0 à 3) combine les deux bits :
-;    plan1=0, plan0=0 → couleur 0 (transparent/fond)
-;    plan1=0, plan0=1 → couleur 1
-;    plan1=1, plan0=0 → couleur 2
-;    plan1=1, plan0=1 → couleur 3
-;  En écrivant les octets en binaire (%...), on "voit" littéralement le
-;  dessin : chaque 1 est un pixel allumé !
+;  Rappel : chaque tuile = 2 "plans" de 8 octets. Couleur d'un pixel :
+;  plan0 seul → couleur 1, plan1 seul → couleur 2, les deux → couleur 3.
 
-; Petit macro pour les chiffres : il écrit les 8 lignes dans les DEUX plans,
-; ce qui donne la couleur 3 (blanc dans notre palette).
 .macro TUILE_BLANCHE l0, l1, l2, l3, l4, l5, l6, l7
         .byte l0, l1, l2, l3, l4, l5, l6, l7   ; plan 0
         .byte l0, l1, l2, l3, l4, l5, l6, l7   ; plan 1
@@ -1288,10 +1870,10 @@ irq:
 
 .segment "CHR"
 
-; --- Tuile $00 : vide (16 octets à zéro) --------------------------------------
+; --- $00 : vide -----------------------------------------------------------------
         .res 16
 
-; --- Tuile $01 : brique, moitié gauche (couleur 1 → plan 0 seulement) ---------
+; --- $01/$02 : brique NORMALE (couleur 1 : orange) -------------------------------
         .byte %00000000
         .byte %01111111
         .byte %01111111
@@ -1300,9 +1882,7 @@ irq:
         .byte %01111111
         .byte %01111111
         .byte %00000000
-        .res 8                  ; plan 1 vide
-
-; --- Tuile $02 : brique, moitié droite ----------------------------------------
+        .res 8
         .byte %00000000
         .byte %11111110
         .byte %11111110
@@ -1313,8 +1893,8 @@ irq:
         .byte %00000000
         .res 8
 
-; --- Tuile $03 : mur (couleur 2 → plan 1 seulement) ---------------------------
-        .res 8                  ; plan 0 vide
+; --- $03 : mur (couleur 2 : gris) --------------------------------------------------
+        .res 8
         .byte %11111111
         .byte %11111111
         .byte %11111111
@@ -1324,7 +1904,7 @@ irq:
         .byte %11111111
         .byte %11111111
 
-; --- Tuile $04 : la balle (couleur 1) -----------------------------------------
+; --- $04 : la balle (couleur 1) ----------------------------------------------------
         .byte %00111100
         .byte %01111110
         .byte %11111111
@@ -1335,7 +1915,7 @@ irq:
         .byte %00111100
         .res 8
 
-; --- Tuile $05 : raquette, bout gauche arrondi (couleur 2) --------------------
+; --- $05-$07 : la raquette (couleur 2) ---------------------------------------------
         .res 8
         .byte %00000000
         .byte %00000000
@@ -1345,8 +1925,6 @@ irq:
         .byte %00111111
         .byte %00000000
         .byte %00000000
-
-; --- Tuile $06 : raquette, milieu ---------------------------------------------
         .res 8
         .byte %00000000
         .byte %00000000
@@ -1356,8 +1934,6 @@ irq:
         .byte %11111111
         .byte %00000000
         .byte %00000000
-
-; --- Tuile $07 : raquette, bout droit -----------------------------------------
         .res 8
         .byte %00000000
         .byte %00000000
@@ -1368,11 +1944,101 @@ irq:
         .byte %00000000
         .byte %00000000
 
-; --- On saute jusqu'à la tuile $10, où commencent les chiffres ----------------
-;  8 tuiles écrites × 16 octets = $80 ; la tuile $10 commence à l'octet $100.
-        .res $100 - $80
+; --- $08/$09 : brique SOLIDE (couleur 2 : grise, rivets dorés en couleur 3) --------
+        .byte %00000000         ; plan 0 : les rivets (couleur 3 avec plan 1)
+        .byte %00000000
+        .byte %00100100
+        .byte %00000000
+        .byte %00000000
+        .byte %00100100
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000         ; plan 1 : le corps gris
+        .byte %01111111
+        .byte %01111111
+        .byte %01111111
+        .byte %01111111
+        .byte %01111111
+        .byte %01111111
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00100100
+        .byte %00000000
+        .byte %00000000
+        .byte %00100100
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %11111110
+        .byte %11111110
+        .byte %11111110
+        .byte %11111110
+        .byte %11111110
+        .byte %11111110
+        .byte %00000000
 
-; --- Tuiles $10 à $19 : les chiffres 0 à 9 -------------------------------------
+; --- $0A/$0B : brique FISSURÉE (couleur 2, avec des trous : la lézarde !) ----------
+        .res 8
+        .byte %00000000
+        .byte %01110111
+        .byte %01101101
+        .byte %01011011
+        .byte %01110110
+        .byte %01101101
+        .byte %01011011
+        .byte %00000000
+        .res 8
+        .byte %00000000
+        .byte %11101110
+        .byte %10110110
+        .byte %11011010
+        .byte %01101110
+        .byte %10110110
+        .byte %11011010
+        .byte %00000000
+
+; --- $0C/$0D : brique DORÉE (couleur 3 : l'or de la palette 1 !) --------------------
+        TUILE_BLANCHE %00000000, %01111111, %01111111, %01111111, %01111111, %01111111, %01111111, %00000000
+        TUILE_BLANCHE %00000000, %11111110, %11111110, %11111110, %11111110, %11111110, %11111110, %00000000
+
+; --- $0E : capsule ÉLARGIR (pilule or, barre blanche) --------------------------------
+        .byte %00000000         ; plan 0 : la pilule (couleur 1 = or)
+        .byte %00000000
+        .byte %01111110
+        .byte %11111111
+        .byte %11111111
+        .byte %01111110
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000         ; plan 1 : la barre "élargir" (couleur 3)
+        .byte %00000000
+        .byte %00000000
+        .byte %01111110
+        .byte %01111110
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+
+; --- $0F : capsule LENTE (pilule or, point blanc) ------------------------------------
+        .byte %00000000
+        .byte %00000000
+        .byte %01111110
+        .byte %11111111
+        .byte %11111111
+        .byte %01111110
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+        .byte %00011000
+        .byte %00011000
+        .byte %00000000
+        .byte %00000000
+        .byte %00000000
+
+; --- $10-$19 : les chiffres 0 à 9 (couleur 3) -----------------------------------------
         TUILE_BLANCHE %01111100, %11000110, %11001110, %11010110, %11100110, %11000110, %01111100, %00000000  ; 0
         TUILE_BLANCHE %00110000, %01110000, %00110000, %00110000, %00110000, %00110000, %11111100, %00000000  ; 1
         TUILE_BLANCHE %01111000, %11001100, %00001100, %00111000, %01100000, %11001100, %11111100, %00000000  ; 2
@@ -1384,5 +2050,37 @@ irq:
         TUILE_BLANCHE %01111000, %11001100, %11001100, %01111000, %11001100, %11001100, %01111000, %00000000  ; 8
         TUILE_BLANCHE %01111000, %11001100, %11001100, %01111100, %00001100, %00011000, %01110000, %00000000  ; 9
 
-; Le reste des 8 Ko de CHR-ROM est rempli de zéros par l'éditeur de liens
-; (voir nes.cfg). Fin du fichier — bravo d'être arrivé jusqu'ici !
+; --- $1A : capsule VIE (un petit cœur, couleur 2 = rouge) ------------------------------
+        .res 8
+        .byte %00000000
+        .byte %01100110
+        .byte %11111111
+        .byte %11111111
+        .byte %01111110
+        .byte %00111100
+        .byte %00011000
+        .byte %00000000
+
+; --- $1B : le tiret ---------------------------------------------------------------------
+        TUILE_BLANCHE %00000000, %00000000, %00000000, %01111110, %00000000, %00000000, %00000000, %00000000
+
+; --- on saute jusqu'à $20, où commence l'alphabet ($1C-$1F libres) ----------------------
+        .res 4 * 16
+
+; --- $20-$2C : les 13 lettres de nos textes (couleur 3) ---------------------------------
+        TUILE_BLANCHE %00110000, %01111000, %11001100, %11001100, %11111100, %11001100, %11001100, %00000000  ; A
+        TUILE_BLANCHE %11111100, %01100110, %01100110, %01111100, %01100110, %01100110, %11111100, %00000000  ; B
+        TUILE_BLANCHE %00111100, %01100110, %11000000, %11000000, %11000000, %01100110, %00111100, %00000000  ; C
+        TUILE_BLANCHE %11111000, %01101100, %01100110, %01100110, %01100110, %01101100, %11111000, %00000000  ; D
+        TUILE_BLANCHE %11111110, %01100010, %01101000, %01111000, %01101000, %01100010, %11111110, %00000000  ; E
+        TUILE_BLANCHE %01111000, %00110000, %00110000, %00110000, %00110000, %00110000, %01111000, %00000000  ; I
+        TUILE_BLANCHE %00111000, %01101100, %11000110, %11000110, %11000110, %01101100, %00111000, %00000000  ; O
+        TUILE_BLANCHE %11111100, %01100110, %01100110, %01111100, %01100000, %01100000, %11110000, %00000000  ; P
+        TUILE_BLANCHE %01111000, %11001100, %11001100, %11001100, %11011100, %01111000, %00011100, %00000000  ; Q
+        TUILE_BLANCHE %11111100, %01100110, %01100110, %01111100, %01101100, %01100110, %11100110, %00000000  ; R
+        TUILE_BLANCHE %01111000, %11001100, %11100000, %01110000, %00011100, %11001100, %01111000, %00000000  ; S
+        TUILE_BLANCHE %11111100, %10110100, %00110000, %00110000, %00110000, %00110000, %01111000, %00000000  ; T
+        TUILE_BLANCHE %11001100, %11001100, %11001100, %11001100, %11001100, %11001100, %01111100, %00000000  ; U
+
+; Le reste des 8 Ko de CHR-ROM est rempli de zéros par l'éditeur de liens.
+; Fin du fichier — et cette fois, vous avez un jeu d'arcade complet !
