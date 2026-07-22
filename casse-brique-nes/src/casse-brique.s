@@ -84,9 +84,35 @@ PPUSCROLL = $2005   ; position de défilement de l'écran (x puis y)
 PPUADDR   = $2006   ; adresse dans la mémoire vidéo (2 écritures : haut, bas)
 PPUDATA   = $2007   ; lecture/écriture de la mémoire vidéo à cette adresse
 OAMDMA    = $4014   ; copie express de 256 octets vers la mémoire des sprites
-APUSTATUS = $4015   ; activation des canaux sonores (non utilisé ici)
+APUSTATUS = $4015   ; interrupteur général des canaux sonores
 JOYPAD1   = $4016   ; lecture de la manette 1
-APUFRAME  = $4017   ; horloge de l'APU (on la coupe pour éviter des parasites)
+APUFRAME  = $4017   ; horloge de l'APU
+
+; --- Les registres du son : l'APU (Audio Processing Unit) --------------------
+;  La NES possède une troisième puce (en fait logée dans le CPU) : l'APU,
+;  avec 5 voix. Nous en utilisons 4 :
+;    - CARRE 1 : une onde carrée → nos BRUITAGES (bips de rebond) ;
+;    - CARRE 2 : une autre onde carrée → la MÉLODIE de la musique ;
+;    - TRIANGLE : une onde douce, plus grave → la BASSE de la musique ;
+;    - BRUIT : un souffle aléatoire → percussions et explosions.
+;  Comme pour le PPU, on pilote tout par des registres. Pour chaque canal :
+;  un registre de volume/timbre, et la "période" sur 2 registres (bas+haut).
+;  ATTENTION, c'est contre-intuitif : la période est l'INVERSE de la
+;  hauteur. Grande période = note grave, petite période = note aiguë.
+CARRE1_VOL  = $4000 ; timbre + volume du carré 1
+CARRE1_BAL  = $4001 ; "balayage" automatique de fréquence (on le neutralise)
+CARRE1_BAS  = $4002 ; période, octet bas
+CARRE1_HAUT = $4003 ; période, 3 bits hauts (+ compteur de durée matériel)
+CARRE2_VOL  = $4004
+CARRE2_BAL  = $4005
+CARRE2_BAS  = $4006
+CARRE2_HAUT = $4007
+TRI_LIN     = $4008 ; compteur linéaire du triangle (sa "pédale" marche/arrêt)
+TRI_BAS     = $400A
+TRI_HAUT    = $400B
+BRUIT_VOL   = $400C
+BRUIT_PER   = $400E ; période du bruit : 0 = "tsss" aigu ... 15 = grondement
+BRUIT_LON   = $400F
 
 ; --- Les boutons de la manette, tels qu'on les reçoit dans `boutons` ---------
 BTN_A      = %10000000
@@ -113,6 +139,28 @@ TUILE_CHIFFRE_0 = $10   ; les chiffres 0-9 occupent les tuiles $10 à $19
 ETAT_ATTENTE = 0    ; la balle est collée à la raquette, on attend A
 ETAT_JEU     = 1    ; la balle est en mouvement
 ETAT_FINI    = 2    ; victoire ou défaite, on attend Start
+
+; --- Les notes de musique ------------------------------------------------------
+;  Chaque note est un simple numéro, qui servira d'index dans les tables
+;  notes_bas / notes_haut (près du moteur de musique, plus bas). Ces tables
+;  contiennent la PÉRIODE de chaque note : période = 1 789 773 ÷ (16 × Hz) − 1
+;  (1 789 773 Hz étant la cadence du CPU). Le la du diapason (440 Hz) donne
+;  ainsi 253. Oui : votre console fait de la physique des ondes.
+NOTE_SILENCE = 0
+NOTE_FA2  = 1
+NOTE_SOL2 = 2
+NOTE_LA2  = 3
+NOTE_DO3  = 4
+NOTE_FA4  = 5
+NOTE_SOL4 = 6
+NOTE_LA4  = 7
+NOTE_SI4  = 8
+NOTE_DO5  = 9
+NOTE_RE5  = 10
+NOTE_MI5  = 11
+NOTE_FA5  = 12
+NOTE_SOL5 = 13
+NOTE_LA5  = 14
 
 ; --- Géométrie du terrain (en pixels) -----------------------------------------
 ;  L'écran fait 256×240 pixels. Le mur du haut occupe la rangée de tuiles 3
@@ -172,6 +220,16 @@ adr_lo:            .res 1
 adr_hi:            .res 1
 tmp_lo:            .res 1
 tmp_hi:            .res 1
+
+; Le moteur de musique : où en est-on dans la partition ?
+mus_active:        .res 1   ; 1 = la musique joue
+mel_pos:           .res 1   ; position dans la table `melodie`
+mel_cpt:           .res 1   ; images restantes avant la prochaine note
+bas_pos:           .res 1   ; position dans la table `basse`
+bas_cpt:           .res 1
+; Les bruitages : combien d'images avant de couper le son ?
+bip_cpt:           .res 1   ; pour le canal carré 1
+bruit_cpt:         .res 1   ; pour le canal de bruit
 
 
 ; -----------------------------------------------------------------------------
@@ -265,6 +323,11 @@ reset:
         jsr charger_palettes
         jsr dessiner_decor
         jsr preparer_partie
+
+        ; On ouvre les 4 robinets du son (1 bit par canal)...
+        lda #%00001111          ; bruit + triangle + carré 2 + carré 1
+        sta APUSTATUS
+        jsr demarrer_musique    ; ...et en musique !
 
         ; Remet le défilement de l'écran à (0,0) — écrire dans PPUADDR l'a
         ; déréglé — puis allume tout.
@@ -484,7 +547,9 @@ lignes_briques_hi:  .byte $20, $20, $20, $21, $21, $21
 
 principale:
         jsr attendre_nmi
-        jsr lire_manette
+        jsr maj_musique         ; le son se met à jour à CHAQUE image, comme
+        jsr maj_bruitages       ; l'image elle-même : c'est ce qui donne un
+        jsr lire_manette        ; tempo parfaitement stable (60 Hz)
         jsr maj_raquette
 
         lda etat
@@ -514,6 +579,7 @@ principale:
         ; A pressé : on lance la balle !
         lda #ETAT_JEU
         sta etat
+        jsr bip_raquette        ; petit "top" de départ
         lda #$FE                ; vers le haut (-2)
         sta balle_dy
         lda #2                  ; vers la droite (+2)...
@@ -620,6 +686,7 @@ deplacer_balle:
         sta balle_x
         lda #2                  ; rebond : on repart vers la droite
         sta balle_dx
+        jsr bip_mur
 @pas_mur_gauche:
         lda balle_x
         cmp #BALLE_X_MAX + 1
@@ -628,6 +695,7 @@ deplacer_balle:
         sta balle_x
         lda #$FE                ; rebond : on repart vers la gauche
         sta balle_dx
+        jsr bip_mur
 @pas_mur_droit:
 
         ; --- Axe vertical ---------------------------------------------------
@@ -641,6 +709,7 @@ deplacer_balle:
         sta balle_y
         lda #2                  ; rebond : on repart vers le bas
         sta balle_dy
+        jsr bip_mur
 @pas_mur_haut:
         lda balle_y
         cmp #BALLE_Y_PERDU
@@ -721,11 +790,14 @@ collision_briques:
         sta balle_dy
 
         jsr incrementer_score
+        jsr bip_brique          ; "cling !"
 
         dec briques_restantes
         bne @pas_gagne
         lda #ETAT_FINI          ; plus une seule brique : GAGNÉ !
         sta etat
+        jsr arreter_musique
+        jsr bip_victoire
 @pas_gagne:
 
         ; On note l'adresse vidéo de la brique pour que la routine nmi
@@ -784,6 +856,7 @@ collision_raquette:
 @rebondir:
         lda #$FE                ; et dans tous les cas, on remonte !
         sta balle_dy
+        jsr bip_raquette
 @rate:
         rts
 
@@ -796,13 +869,14 @@ perdre_vie:
         beq @plus_de_vies
         lda #ETAT_ATTENTE       ; il reste des vies : la balle revient se
         sta etat                ; coller à la raquette
-        rts
+        jmp bruit_vie           ; "pshh" de dépit (son rts nous fera revenir)
 @plus_de_vies:
         lda #ETAT_FINI
         sta etat
         lda #$F0                ; cache la balle sous le bas de l'écran
         sta balle_y
-        rts
+        jsr arreter_musique     ; silence, défaite...
+        jmp bruit_fin           ; ...et long grondement (son rts conclura)
 
 
 ; -----------------------------------------------------------------------------
@@ -828,6 +902,210 @@ incrementer_score:
         inc score_c
 @fini:
         rts
+
+
+; =============================================================================
+;  LE SON — un juke-box en 6502
+; =============================================================================
+;  Le principe est le même que pour l'image : l'APU ne "joue" pas une
+;  chanson tout seul, il tient une note tant qu'on ne lui dit rien. C'est
+;  donc NOUS qui, à chaque image (60 fois/seconde), décomptons la durée de
+;  la note en cours et envoyons la suivante quand c'est l'heure. Une
+;  partition n'est qu'une suite d'octets : note, durée, note, durée...
+;
+;  Notre orchestre :  carré 2 = la mélodie,  triangle = la basse,
+;                     carré 1 = les bips,    bruit = les percussions/chocs.
+
+; -----------------------------------------------------------------------------
+;  demarrer_musique / arreter_musique
+; -----------------------------------------------------------------------------
+demarrer_musique:
+        lda #1
+        sta mus_active
+        sta mel_cpt             ; "1 image restante" : la première note
+        sta bas_cpt             ; partira dès la prochaine mise à jour
+        lda #0
+        sta mel_pos
+        sta bas_pos
+        rts
+
+arreter_musique:
+        lda #0
+        sta mus_active
+        lda #%00110000          ; volume 0 sur la mélodie...
+        sta CARRE2_VOL
+        lda #%10000000          ; ...et compteur linéaire à 0 : le triangle
+        sta TRI_LIN             ; se taira tout seul
+        rts
+
+; -----------------------------------------------------------------------------
+;  maj_musique — appelée à chaque image : fait avancer la partition
+; -----------------------------------------------------------------------------
+maj_musique:
+        lda mus_active
+        bne @active
+        rts
+@active:
+        ; ---------- la MÉLODIE, sur le canal carré 2 ----------
+        dec mel_cpt
+        bne @basse              ; la note en cours n'est pas finie
+        ldx mel_pos
+        lda melodie, x
+        cmp #$FF                ; $FF = fin de la partition...
+        bne @note_lue
+        ldx #0                  ; ...alors on reprend au début : la boucle !
+        lda melodie, x
+@note_lue:
+        beq @soupir             ; note 0 = un silence
+        tay                     ; Y = numéro de la note
+        lda #%10110110          ; timbre : onde carrée 50 %, volume 6
+        sta CARRE2_VOL          ;   (les 2 bits du haut = le "duty" : la
+        lda #$08                ;    forme de l'onde, donc le timbre !)
+        sta CARRE2_BAL          ; balayage neutralisé (sinon il coupe les graves)
+        lda notes_bas, y        ; la période de la note, octet bas...
+        sta CARRE2_BAS
+        lda notes_haut, y       ; ...et octet haut
+        ora #%11111000
+        sta CARRE2_HAUT
+        jmp @duree
+@soupir:
+        lda #%00110000          ; volume 0 = chut
+        sta CARRE2_VOL
+@duree:
+        inx
+        lda melodie, x          ; l'octet suivant est la durée en images
+        sta mel_cpt
+        inx
+        stx mel_pos
+
+@basse:
+        ; ---------- la BASSE, sur le canal triangle ----------
+        dec bas_cpt
+        bne @fin
+        ldx bas_pos
+        lda basse, x
+        cmp #$FF
+        bne @basse_lue
+        ldx #0
+        lda basse, x
+@basse_lue:
+        tay
+        lda #%11111111          ; compteur linéaire au maximum : joue !
+        sta TRI_LIN             ; (le triangle n'a pas de volume : il est
+        lda notes_bas, y        ;  toujours à fond, doux et rond)
+        sta TRI_BAS
+        lda notes_haut, y
+        ora #%11111000
+        sta TRI_HAUT
+        inx
+        lda basse, x
+        sta bas_cpt
+        inx
+        stx bas_pos
+@fin:
+        rts
+
+; -----------------------------------------------------------------------------
+;  LA PARTITION — modifiez-la, c'est fait pour !
+; -----------------------------------------------------------------------------
+;  Format : note, durée (en images ; 12 images ≈ une croche allègre), ...
+;  et $FF pour boucler. Quatre mesures sur l'enchaînement do / la mineur /
+;  fa / sol : le "I-vi-IV-V", l'accord secret de la moitié des tubes.
+
+melodie:
+        .byte NOTE_DO5,  12, NOTE_MI5, 12, NOTE_SOL5, 12, NOTE_MI5, 12
+        .byte NOTE_LA4,  12, NOTE_DO5, 12, NOTE_MI5,  12, NOTE_DO5, 12
+        .byte NOTE_FA4,  12, NOTE_LA4, 12, NOTE_DO5,  12, NOTE_LA4, 12
+        .byte NOTE_SOL4, 12, NOTE_SI4, 12, NOTE_RE5,  12, NOTE_SI4, 12
+        .byte $FF
+
+basse:
+        .byte NOTE_DO3, 48, NOTE_LA2, 48, NOTE_FA2, 48, NOTE_SOL2, 48
+        .byte $FF
+
+; Les périodes des notes (voir la formule près des constantes NOTE_*).
+; L'index 0 est le silence : jamais lu, mais il cale les tables.
+;                 sil  fa2  sol2 la2  do3  fa4  sol4 la4  si4  do5  ré5  mi5  fa5  sol5 la5
+notes_bas:  .byte $00, $00, $74, $F8, $56, $3F, $1C, $FD, $E1, $D5, $BD, $A9, $9F, $8E, $7E
+notes_haut: .byte $00, $05, $04, $03, $03, $01, $01, $00, $00, $00, $00, $00, $00, $00, $00
+
+; -----------------------------------------------------------------------------
+;  LES BRUITAGES
+; -----------------------------------------------------------------------------
+;  Un bruitage, c'est : régler un canal, noter une durée, et maj_bruitages
+;  coupera le son quand elle sera écoulée. Le canal carré 1 fait les bips
+;  (chaque événement a sa hauteur : plus c'est important, plus c'est aigu),
+;  le canal de bruit fait les catastrophes.
+
+; A = période octet bas, X = période octet haut, Y = durée en images
+jouer_bip:
+        sta CARRE1_BAS
+        txa
+        ora #%11111000
+        sta CARRE1_HAUT
+        lda #%10111010          ; onde carrée 50 %, volume 10
+        sta CARRE1_VOL
+        lda #$08
+        sta CARRE1_BAL
+        sty bip_cpt
+        rts
+
+; A = période du bruit (0 = aigu ... 15 = grave), Y = durée en images
+jouer_bruit:
+        sta BRUIT_PER
+        lda #%00111010          ; volume 10
+        sta BRUIT_VOL
+        lda #%11111000
+        sta BRUIT_LON           ; déclenche le canal
+        sty bruit_cpt
+        rts
+
+maj_bruitages:
+        lda bip_cpt
+        beq @bruit              ; pas de bip en cours
+        dec bip_cpt
+        bne @bruit              ; toujours en cours
+        lda #%00110000          ; fini : volume 0
+        sta CARRE1_VOL
+@bruit:
+        lda bruit_cpt
+        beq @fin
+        dec bruit_cpt
+        bne @fin
+        lda #%00110000
+        sta BRUIT_VOL
+@fin:
+        rts
+
+; Le "catalogue" : un petit réglage par événement du jeu.
+bip_mur:                        ; toc discret, médium
+        lda #$1C
+        ldx #$01                ; période $011C = sol4
+        ldy #3
+        jmp jouer_bip
+bip_raquette:                   ; ponk plus haut
+        lda #$FD
+        ldx #$00                ; période $00FD = la4
+        ldy #4
+        jmp jouer_bip
+bip_brique:                     ; cling ! aigu
+        lda #$6A
+        ldx #$00                ; période $006A ≈ do6
+        ldy #4
+        jmp jouer_bip
+bip_victoire:                   ; une grande note claire
+        lda #$7E
+        ldx #$00                ; période $007E = la5
+        ldy #40
+        jmp jouer_bip
+bruit_vie:                      ; "pshh" : une vie s'envole
+        lda #$0A
+        ldy #20
+        jmp jouer_bruit
+bruit_fin:                      ; long grondement de game over
+        lda #$0C
+        ldy #45
+        jmp jouer_bruit
 
 
 ; -----------------------------------------------------------------------------

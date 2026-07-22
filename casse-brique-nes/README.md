@@ -188,6 +188,7 @@ dont beaucoup de commentaires). Ordre de lecture conseillé :
 | `principale` | la boucle de jeu et la machine à états (attente / jeu / fini) |
 | `lire_manette` | lire du matériel bit par bit (l'astuce LSR/ROL) |
 | `deplacer_balle`, `collision_*` | divisions par 8 en décalant les bits, complément à deux, rebonds |
+| `maj_musique`, `jouer_bip`... | l'APU : jouer une partition et des bruitages (section suivante) |
 | `nmi` | le DMA des sprites, la pile, `RTI` |
 | Segment `CHR` | les graphismes dessinés octet par octet en binaire — chaque `1` est un pixel ! |
 
@@ -215,6 +216,33 @@ Une simple variable `etat` (0, 1 ou 2) et un aiguillage au début de la boucle
 principale : c'est le patron de conception le plus utile du jeu vidéo, en
 trois `CMP`/`BEQ`.
 
+### La musique et les bruitages : l'APU
+
+La NES a une troisième puce (logée dans le CPU) : l'**APU**, avec 5 voix.
+Le jeu en utilise 4 : le **carré 2** joue la mélodie, le **triangle** la
+basse, le **carré 1** les bips de rebond, et le canal de **bruit** les
+catastrophes (vie perdue, game over). Comme le PPU, l'APU se pilote par des
+registres (`$4000-$400F`) — et comme pour l'image, il ne « joue » rien tout
+seul : il tient une note tant qu'on ne lui dit rien.
+
+Trois idées à retenir en lisant le code :
+
+- **La hauteur d'une note est une *période*, pas une fréquence** — et c'est
+  inversé : grande période = note grave. La formule est dans le source :
+  `période = 1 789 773 ÷ (16 × Hz) − 1`. Le la 440 Hz donne 253.
+- **Une partition, c'est des octets** : la table `melodie` alterne note et
+  durée en images (`NOTE_DO5, 12, ...`), `$FF` reboucle. À chaque image,
+  `maj_musique` décompte, et envoie la note suivante quand c'est l'heure —
+  le tempo est parfaitement stable puisqu'il est accroché aux 60 Hz du
+  VBlank, comme l'image.
+- **Un bruitage, c'est un canal réglé puis coupé** : `jouer_bip` règle le
+  carré 1 (période + volume), note une durée, et `maj_bruitages` remet le
+  volume à zéro quand elle est écoulée. Chaque événement du jeu a sa
+  hauteur : mur (grave), raquette (médium), brique (aigu).
+
+La mélodie tourne sur do / la mineur / fa / sol — le fameux enchaînement
+« I-vi-IV-V » de la moitié des tubes de l'histoire. Changez-la !
+
 ---
 
 ## 5. Exercices
@@ -236,9 +264,12 @@ Du plus facile au plus costaud. Recompilez avec `make` après chaque essai.
    (`collision_raquette`). Coupez-la en 4 zones : les bords renvoient la
    balle avec `dx = ±3`, le centre avec `dx = ±1`. (Attention : avec dx=3,
    vérifiez vos bornes de rebond sur les murs !)
-7. **Du son !** — l'APU (la puce audio) s'active via `$4015`. Écrire dans
-   `$4000-$4003` fait chanter le premier canal. Faites « bip » à chaque
-   brique cassée ([doc APU](https://www.nesdev.org/wiki/APU_basics)).
+7. **Compositeur** — changez la table `melodie` (note, durée, note,
+   durée..., `$FF` pour boucler). Ajoutez une note à la gamme : calculez sa
+   période avec la formule du source, ajoutez-la aux tables
+   `notes_bas`/`notes_haut` et sa constante `NOTE_...`. Essayez aussi de
+   changer le *timbre* : les 2 bits du haut de `CARRE2_VOL` (le « duty »)
+   transforment le son du tout au tout ([doc APU](https://www.nesdev.org/wiki/APU_basics)).
 8. **Niveau 2** — quand `briques_restantes` tombe à 0, au lieu de figer le
    jeu, redessinez les briques et remontez la vitesse. Il faudra le faire
    écran éteint (`PPUMASK = 0`) ou par petits paquets pendant les VBlank...
