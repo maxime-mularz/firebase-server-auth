@@ -1,0 +1,31 @@
+name: Blocage technique
+description: Une contrainte technique bloque un contenu ou une echeance
+title: "[BLOCKER] "
+labels: ["technical", "blocker"]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Contenu bloque
+      placeholder: SCENE_CH01_001, CHAPTER_02...
+    validations:
+      required: true
+  - type: textarea
+    id: contrainte
+    attributes:
+      label: La contrainte
+      description: Chiffres a l'appui (budget VRAM, VBlank, banques, SRAM...)
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives realisables
+      description: Au moins une, avec cout estime
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: Decision attendue
+      description: Qui doit trancher, entre quelles options

@@ -1,0 +1,35 @@
+name: Retour de playtest
+description: Observation issue d'une session de test
+title: "[PLAYTEST] "
+labels: ["playtest"]
+body:
+  - type: input
+    id: fiche
+    attributes:
+      label: Fiche de playtest
+      placeholder: PLAYTEST_001 (docs/reviews/playtests/)
+    validations:
+      required: true
+  - type: input
+    id: scenes
+    attributes:
+      label: Scenes concernees
+      placeholder: SCENE_CH01_001, SCENE_CH01_002
+  - type: textarea
+    id: observation
+    attributes:
+      label: Observation brute
+      description: Ce qui s'est passe, sans interpretation
+    validations:
+      required: true
+  - type: textarea
+    id: interpretation
+    attributes:
+      label: Interpretation (separee de l'observation)
+  - type: dropdown
+    id: type
+    attributes:
+      label: Registre
+      options: [emotion, comprehension, rythme, difficulte, bug, autre]
+    validations:
+      required: true

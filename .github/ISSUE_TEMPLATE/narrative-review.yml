@@ -1,0 +1,45 @@
+name: Review narrative
+description: Critique structuree d'un document narratif (sans le modifier)
+title: "[NARRATIVE] "
+labels: ["narrative", "review"]
+body:
+  - type: input
+    id: target
+    attributes:
+      label: Cible
+      description: ID du document vise (SCENE_..., CHAPTER_..., CHAR_...)
+      placeholder: SCENE_CH01_001
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Severite
+      options: [note, low, medium, high, blocker]
+    validations:
+      required: true
+  - type: textarea
+    id: probleme
+    attributes:
+      label: Probleme
+      description: Le fait, precisement, avec preuves (citations, lignes)
+    validations:
+      required: true
+  - type: textarea
+    id: impact
+    attributes:
+      label: Impact joueur
+    validations:
+      required: true
+  - type: textarea
+    id: proposition
+    attributes:
+      label: Proposition principale (realiste)
+    validations:
+      required: true
+  - type: checkboxes
+    id: decision
+    attributes:
+      label: Arbitrage
+      options:
+        - label: "[DECISION_REQUIRED] Une decision du Creative Director est necessaire"

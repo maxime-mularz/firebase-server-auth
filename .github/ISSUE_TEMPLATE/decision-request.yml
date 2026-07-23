@@ -1,0 +1,31 @@
+name: Demande de decision
+description: Le Creative Director doit trancher
+title: "[DECISION_REQUIRED] "
+labels: ["decision"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: La decision demandee
+      description: LA question, fermee si possible
+    validations:
+      required: true
+  - type: textarea
+    id: contexte
+    attributes:
+      label: Contexte en 5 lignes
+    validations:
+      required: true
+  - type: textarea
+    id: options
+    attributes:
+      label: Options (pour / contre / cout)
+    validations:
+      required: true
+  - type: textarea
+    id: recommandation
+    attributes:
+      label: Recommandation du demandeur (facultatif)
+  - type: markdown
+    attributes:
+      value: "Une fois tranchee : ADR dans docs/decisions/ et fermeture de l'issue."
